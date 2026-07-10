@@ -1,0 +1,154 @@
+/* SaathRide — design tokens
+   Ink navy #17233B · Highway teal #0E7C66 · Marigold #FFB020
+   Mist #F2F5F7 · White #FFFFFF · Signal red #D64545
+   Display: Sora · Body: Manrope
+   Signature: the route line — origin dot → dashed line → destination dot */
+
+:root {
+  --ink: #17233b;
+  --ink-soft: #46536b;
+  --teal: #0e7c66;
+  --teal-dark: #0a5f4f;
+  --marigold: #ffb020;
+  --mist: #f2f5f7;
+  --line: #dde4ea;
+  --white: #ffffff;
+  --red: #d64545;
+  --radius: 14px;
+  --shadow: 0 2px 10px rgba(23, 35, 59, 0.08);
+}
+
+* { box-sizing: border-box; margin: 0; }
+
+body {
+  font-family: "Manrope", system-ui, sans-serif;
+  background: var(--mist);
+  color: var(--ink);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1, h2, h3, .brand { font-family: "Sora", system-ui, sans-serif; }
+
+/* ---------- top bar ---------- */
+.topbar {
+  background: var(--white);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky; top: 0; z-index: 10;
+}
+.brand { font-weight: 800; font-size: 1.3rem; color: var(--ink); text-decoration: none; letter-spacing: -0.02em; }
+.brand span { color: var(--teal); }
+nav { display: flex; gap: 6px; flex-wrap: wrap; }
+nav button {
+  background: none; border: none; font: inherit; font-weight: 600;
+  color: var(--ink-soft); padding: 8px 12px; border-radius: 8px; cursor: pointer;
+}
+nav button:hover, nav button.active { background: var(--mist); color: var(--ink); }
+nav button.cta { background: var(--teal); color: var(--white); }
+nav button.cta:hover { background: var(--teal-dark); }
+
+main { flex: 1; width: 100%; max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+
+/* ---------- hero ---------- */
+.hero { text-align: left; padding: 44px 0 28px; }
+.hero .eyebrow {
+  display: inline-block; background: var(--marigold); color: var(--ink);
+  font-weight: 700; font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 999px; margin-bottom: 14px;
+}
+.hero h1 { font-size: clamp(1.9rem, 5vw, 3rem); line-height: 1.12; letter-spacing: -0.03em; }
+.hero h1 em { font-style: normal; color: var(--teal); }
+.hero p { margin-top: 14px; color: var(--ink-soft); max-width: 46ch; font-size: 1.05rem; }
+.hero .actions { margin-top: 22px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ---------- buttons & forms ---------- */
+.btn {
+  font: inherit; font-weight: 700; border: none; cursor: pointer;
+  padding: 11px 18px; border-radius: 10px; background: var(--teal); color: var(--white);
+}
+.btn:hover { background: var(--teal-dark); }
+.btn.ghost { background: var(--white); color: var(--ink); border: 1.5px solid var(--line); }
+.btn.ghost:hover { border-color: var(--ink-soft); }
+.btn.warn { background: var(--red); }
+.btn.small { padding: 7px 12px; font-size: 0.85rem; border-radius: 8px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.card {
+  background: var(--white); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow);
+}
+.stack > * + * { margin-top: 14px; }
+
+form label { display: block; font-weight: 600; font-size: 0.88rem; margin-bottom: 5px; }
+form input, form select, form textarea {
+  width: 100%; font: inherit; padding: 10px 12px;
+  border: 1.5px solid var(--line); border-radius: 10px; background: var(--white);
+}
+form input:focus, form select:focus, form textarea:focus {
+  outline: 2px solid var(--teal); outline-offset: 1px; border-color: var(--teal);
+}
+.field { margin-bottom: 14px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .row2 { grid-template-columns: 1fr; } }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; }
+.check input { width: auto; }
+
+/* ---------- route line (signature) ---------- */
+.route { display: flex; align-items: center; gap: 10px; font-weight: 700; min-width: 0; }
+.route .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.route .dot.origin { background: var(--teal); }
+.route .dot.dest { background: var(--marigold); border: 2px solid var(--ink); }
+.route .dash { flex: 1; border-top: 2px dashed var(--line); min-width: 24px; }
+.route .place { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- ride cards ---------- */
+.ride-card { display: block; text-align: left; width: 100%; cursor: pointer; transition: transform 0.08s ease; }
+.ride-card:hover { transform: translateY(-2px); border-color: var(--teal); }
+.ride-meta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; color: var(--ink-soft); font-size: 0.88rem; font-weight: 500; }
+.price { font-family: "Sora"; font-weight: 800; color: var(--teal); font-size: 1.05rem; }
+.tag {
+  display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+  padding: 3px 9px; border-radius: 999px; background: var(--mist); color: var(--ink-soft);
+}
+.tag.women { background: #fbe6ef; color: #b0326b; }
+.tag.verified { background: #e2f3ee; color: var(--teal-dark); }
+.tag.recurring { background: #fff3d6; color: #8a6100; }
+
+/* ---------- misc ---------- */
+.section-title { margin: 26px 0 12px; font-size: 1.15rem; }
+.muted { color: var(--ink-soft); font-size: 0.9rem; }
+.empty { text-align: center; padding: 40px 16px; color: var(--ink-soft); }
+.avatar {
+  width: 40px; height: 40px; border-radius: 50%; flex: none;
+  background: var(--ink); color: var(--white); font-weight: 700;
+  display: flex; align-items: center; justify-content: center; font-family: "Sora";
+}
+.person { display: flex; align-items: center; gap: 12px; }
+.stars { color: var(--marigold); font-weight: 700; }
+
+/* chat */
+.chat-box { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 6px 0; }
+.msg { max-width: 78%; padding: 8px 12px; border-radius: 12px; background: var(--mist); font-size: 0.92rem; }
+.msg.mine { align-self: flex-end; background: var(--teal); color: var(--white); }
+.msg .who { display: block; font-size: 0.72rem; font-weight: 700; opacity: 0.7; margin-bottom: 2px; }
+.chat-form { display: flex; gap: 8px; margin-top: 10px; }
+.chat-form input { flex: 1; }
+
+.toast {
+  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: var(--white); padding: 11px 18px;
+  border-radius: 10px; font-weight: 600; box-shadow: var(--shadow); z-index: 50;
+}
+.footer {
+  text-align: center; padding: 18px; font-size: 0.8rem; color: var(--ink-soft);
+  border-top: 1px solid var(--line); background: var(--white);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

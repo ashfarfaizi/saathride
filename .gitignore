@@ -1,0 +1,6 @@
+node_modules/
+saathride.db
+saathride.db-shm
+saathride.db-wal
+.env
+.DS_Store
