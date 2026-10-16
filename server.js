@@ -236,4 +236,8 @@ app.post("/api/rides/:id/rate", auth, (req, res) => {
 
 app.use((req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.listen(PORT, () => console.log(`SaathRide running → http://localhost:${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`SaathRide running → http://localhost:${PORT}`));
+}
+
+module.exports = app;
