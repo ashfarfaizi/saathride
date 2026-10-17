@@ -1,68 +1,63 @@
-// SaathRide — SQLite database setup
-const Database = require("better-sqlite3");
-const db = new Database(process.env.DB_PATH || "saathride.db");
-db.pragma("journal_mode = WAL");
+// SaathRide — database access (Neon PostgreSQL via `pg`).
+// Exposes: query(sql, params) -> rows[], one(sql, params) -> row|null, tx(fn), migrate(), ping().
+// Under NODE_ENV=test the same interface is backed by an in-memory SQLite (test/sqlite-adapter.js).
+const fs = require("fs");
+const path = require("path");
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  phone TEXT,
-  gender TEXT DEFAULT 'unspecified',
-  college TEXT,
-  is_verified INTEGER DEFAULT 0,        -- 1 if college/company email domain
-  has_vehicle INTEGER DEFAULT 0,
-  vehicle_type TEXT,                    -- 'scooty' | 'bike' | 'car'
-  bio TEXT DEFAULT '',
-  created_at TEXT DEFAULT (datetime('now'))
-);
+if (process.env.NODE_ENV === "test") {
+  module.exports = require("./test/sqlite-adapter");
+} else {
+  const { Pool } = require("pg");
 
-CREATE TABLE IF NOT EXISTS rides (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  driver_id INTEGER NOT NULL REFERENCES users(id),
-  origin TEXT NOT NULL,
-  destination TEXT NOT NULL,
-  depart_date TEXT NOT NULL,            -- YYYY-MM-DD
-  depart_time TEXT NOT NULL,            -- HH:MM
-  seats_total INTEGER NOT NULL,
-  price_per_seat INTEGER NOT NULL,      -- fuel-share in INR
-  vehicle_type TEXT NOT NULL,
-  women_only INTEGER DEFAULT 0,
-  recurring TEXT DEFAULT '',            -- e.g. 'Mon,Fri' or '' for one-time
-  notes TEXT DEFAULT '',
-  status TEXT DEFAULT 'open',           -- open | completed | cancelled
-  created_at TEXT DEFAULT (datetime('now'))
-);
+  // Reuse the pool across warm serverless invocations.
+  function getPool() {
+    if (!globalThis.__saathridePool) {
+      const url = process.env.DATABASE_URL;
+      if (!url) throw new Error("DATABASE_URL is not set (add your Neon connection string to the environment)");
+      const pool = new Pool({
+        connectionString: url,       // Neon strings already contain ?sslmode=require
+        max: 5,                      // small: Neon's pooled endpoint multiplexes connections
+        idleTimeoutMillis: 10_000,
+        connectionTimeoutMillis: 10_000,
+      });
+      pool.on("error", (err) => console.error("pg pool error:", err.message));
+      globalThis.__saathridePool = pool;
+    }
+    return globalThis.__saathridePool;
+  }
 
-CREATE TABLE IF NOT EXISTS bookings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ride_id INTEGER NOT NULL REFERENCES rides(id),
-  rider_id INTEGER NOT NULL REFERENCES users(id),
-  status TEXT DEFAULT 'requested',      -- requested | approved | rejected | cancelled
-  created_at TEXT DEFAULT (datetime('now')),
-  UNIQUE(ride_id, rider_id)
-);
+  const query = async (text, params = []) => (await getPool().query(text, params)).rows;
+  const one = async (text, params = []) => (await query(text, params))[0] || null;
 
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ride_id INTEGER NOT NULL REFERENCES rides(id),
-  sender_id INTEGER NOT NULL REFERENCES users(id),
-  body TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
-);
+  async function tx(fn) {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const q = async (text, params = []) => (await client.query(text, params)).rows;
+      const result = await fn({ query: q, one: async (t, p) => (await q(t, p))[0] || null });
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
-CREATE TABLE IF NOT EXISTS ratings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ride_id INTEGER NOT NULL REFERENCES rides(id),
-  rater_id INTEGER NOT NULL REFERENCES users(id),
-  ratee_id INTEGER NOT NULL REFERENCES users(id),
-  stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5),
-  comment TEXT DEFAULT '',
-  created_at TEXT DEFAULT (datetime('now')),
-  UNIQUE(ride_id, rater_id, ratee_id)
-);
-`);
+  async function migrate() {
+    const client = await getPool().connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(727274)");   // one migration at a time across instances
+      for (const file of ["schema.sql", "schema_upgrade.sql"]) await client.query(fs.readFileSync(path.join(__dirname, file), "utf8"));
+    } finally {
+      try { await client.query("SELECT pg_advisory_unlock(727274)"); } catch { /* ignore */ }
+      client.release();
+    }
+  }
 
-module.exports = db;
+  const ping = async () => { await query("SELECT 1"); return true; };
+  const close = async () => { if (globalThis.__saathridePool) await globalThis.__saathridePool.end(); globalThis.__saathridePool = null; };
+
+  module.exports = { query, one, tx, migrate, ping, close };
+}

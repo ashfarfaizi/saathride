@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["bom1"],
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "{public/**,schema.sql,schema_upgrade.sql,node_modules/livekit-client/dist/livekit-client.umd.js,node_modules/mapbox-gl/dist/mapbox-gl.js,node_modules/mapbox-gl/dist/mapbox-gl.css}",
+      "maxDuration": 30
+    }
+  }
+}

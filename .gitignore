@@ -1,6 +1,9 @@
 node_modules/
-saathride.db
-saathride.db-shm
-saathride.db-wal
 .env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+.vercel
 .DS_Store
