@@ -39,7 +39,7 @@ function scoreTrip(trip, q) {
   if (to) {
     if (hasPt(to) && hasPt(g.dest)) {
       const d = haversineKm(to, g.dest);
-      if (d <= NEAR_KM) { score += 40; placeHit = true; reasons.push({ kind: "destination", basis: "straight_line", text: `Same destination area — about ${km(d)} from where you're going` }); }
+      if (d <= NEAR_KM) { score += 40; placeHit = true; reasons.push({ kind: "destination", basis: "straight_line", text: d < 0.15 ? "Same destination as yours" : `Same destination area — about ${km(d)} from where you're going` }); }
       else if (d <= AREA_KM) { score += 25; placeHit = true; reasons.push({ kind: "destination", basis: "straight_line", text: `Ends about ${km(d)} from your destination` }); }
       else if (route) {
         const n = nearestOnLine(to, route);
@@ -54,7 +54,7 @@ function scoreTrip(trip, q) {
   if (from) {
     if (hasPt(from) && hasPt(g.origin)) {
       const d = haversineKm(from, g.origin);
-      if (d <= NEAR_KM) { score += 25; placeHit = true; reasons.push({ kind: "pickup", basis: "straight_line", text: `Starts about ${km(d)} from you` }); }
+      if (d <= NEAR_KM) { score += 25; placeHit = true; reasons.push({ kind: "pickup", basis: "straight_line", text: d < 0.15 ? "Starts where you're starting" : `Starts about ${km(d)} from you` }); }
       else if (d <= AREA_KM) { score += 12; placeHit = true; reasons.push({ kind: "pickup", basis: "straight_line", text: `Starts about ${km(d)} from your pickup area` }); }
       else if (route) {
         const n = nearestOnLine(from, route);
