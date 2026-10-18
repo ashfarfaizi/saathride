@@ -132,13 +132,50 @@ async function sync() {
     if (changed && parseHash().path.startsWith("/inbox")) refreshConvoList();
   } catch { /* offline: try again next tick */ }
 }
+// ---------- polling budget ----------
+// Every poll wakes the server and the database, both metered on the free plans. So poll briskly only
+// while someone is using the app, slow down when they stop touching it, and stop entirely when the
+// tab is hidden or untouched for 10 minutes (the database can then go to sleep). Any tap, key, scroll
+// or coming back to the tab wakes everything up and refreshes at once.
+const Pulse = {
+  last: Date.now(), ACTIVE: 2 * 60e3, SLEEP: 10 * 60e3, wakers: [],
+  hidden() { return document.hidden === true; },
+  mode() {
+    if (Call.state) return "call";
+    // During a trip in safety mode, never fully sleep: check-in prompts must still arrive.
+    if (this.keepAwake && this.keepAwake()) return this.hidden() || Date.now() - this.last > this.ACTIVE ? "idle" : "active";
+    if (this.hidden() || Date.now() - this.last > this.SLEEP) return "asleep";
+    return Date.now() - this.last > this.ACTIVE ? "idle" : "active";
+  },
+  onWake(fn) { this.wakers.push(fn); },
+  touch() {
+    const wasAsleep = this.hidden() ? false : Date.now() - this.last > this.SLEEP;
+    this.last = Date.now();
+    if (wasAsleep) this.wake();
+  },
+  wake() { this.wakers.forEach((f) => { try { f(); } catch { /* one waker failing must not stop the rest */ } }); },
+};
+["pointerdown", "keydown", "touchstart", "scroll", "wheel"].forEach((ev) => document.addEventListener(ev, () => Pulse.touch(), { passive: true, capture: true }));
+document.addEventListener("visibilitychange", () => { if (!Pulse.hidden()) { Pulse.last = Date.now(); Pulse.wake(); } });
+// Local timers only (no network) — unref'd so they never keep a test runner alive.
+const later = (fn, ms) => { const t = setTimeout(fn, ms); if (t && t.unref) t.unref(); return t; };
+
+let syncGen = 0;
+function syncEvery(mode) { return mode === "call" ? 5000 : mode === "idle" ? 60000 : config.calls ? 10000 : 15000; }
+function stopSync() { syncGen++; clearTimeout(syncTimer); }
 function startSync() {
-  clearInterval(syncTimer);
+  stopSync();
   if (!me) return;
-  sync();
-  let ticks = 0;
-  syncTimer = setInterval(() => { ticks++; if (document.hidden === true && !Call.state && ticks % 6) return; sync(); }, 5000);   // every 5s, every 30s in a background tab
+  const gen = syncGen;
+  const loop = async () => {
+    if (gen !== syncGen) return;
+    const mode = Pulse.mode();
+    if (mode !== "asleep") await sync();
+    if (gen === syncGen) syncTimer = later(loop, mode === "asleep" ? 15000 : syncEvery(mode));
+  };
+  loop();
 }
+Pulse.onWake(() => { if (me) startSync(); });
 
 // ---------- dialogs ----------
 function dialog({ title, html, submitLabel, onSubmit }) {
@@ -566,8 +603,27 @@ async function openChat(id) {
     <div id="chatFoot">${chatFooter(c)}</div>`;
   wireComposer();
   await loadMessages();
-  chat.timer = setInterval(pollMessages, 3000);
+  startChatPoll();
 }
+// Fast while a conversation is going back and forth, slower when it's quiet, off when the app sleeps.
+function chatEvery() {
+  const mode = Pulse.mode();
+  if (mode === "asleep") return 0;
+  if (Date.now() - (chat.hot || 0) < 90e3) return 4000;
+  return mode === "idle" ? 30000 : 8000;
+}
+function startChatPoll() {
+  clearTimeout(chat.timer);
+  const id = chat.id, gen = (chat.pollGen = (chat.pollGen || 0) + 1);
+  const loop = async () => {
+    if (chat.id !== id || chat.pollGen !== gen) return;
+    const ms = chatEvery();
+    if (!ms) return;                       // asleep: the waker restarts us
+    chat.timer = later(async () => { if (chat.id !== id || chat.pollGen !== gen) return; await pollMessages(); loop(); }, ms);
+  };
+  loop();
+}
+Pulse.onWake(() => { if (chat.id && $("#chatLog")) { pollMessages(); startChatPoll(); } });
 
 function callButton(c) {
   if (!config.calls || !c.calls_enabled) return "";
@@ -680,6 +736,7 @@ async function pollMessages() {
     const log = $("#chatLog"), stick = nearBottom(log);
     const fresh = d.messages.filter((m) => !(log.querySelector && log.querySelector(`[data-mid="${m.id}"]`)));
     if (fresh.length) {
+      chat.hot = Date.now();
       if (!chat.lastId) log.innerHTML = "";
       renderLog(fresh); chat.lastId = d.messages[d.messages.length - 1].id;
       if (stick) scrollBottom();
@@ -687,7 +744,7 @@ async function pollMessages() {
       markRead();
     }
     applyState(d.state); updateSeen();
-  } catch (err) { if (/not found/i.test(err.message)) clearInterval(chat.timer); }
+  } catch (err) { if (/not found/i.test(err.message)) { clearTimeout(chat.timer); chat.pollGen = (chat.pollGen || 0) + 1; } }
 }
 async function olderMessages() {
   if (!chat.firstId) return;
@@ -729,6 +786,7 @@ async function sendText() {
   const input = $("#msgInput"); if (!input) return;
   const text = input.value.trim(); if (!text) return;
   input.value = ""; input.style.height = "auto";
+  chat.hot = Date.now(); if (chat.timer) startChatPoll();   // expect a reply soon: poll fast
   await sendMessage({ body: text });
 }
 async function sendMessage(payload) {
@@ -1398,7 +1456,7 @@ function viewEditProfile() {
     $("#blockedList").innerHTML = d.blocked.length ? d.blocked.map((u) => `<div class="request">${avatar(u, "sm")}<div class="grow"><strong>${esc(u.name)}</strong> <span class="muted">@${esc(u.username)}</span></div><button type="button" class="btn ghost small" data-act="unblockUser" data-id="${u.id}">Unblock</button></div>`).join("")
       : "You haven't blocked anyone. Blocked members can't message, call or send you requests, and you won't see their posts.";
   }).catch(() => { $("#blockedList").textContent = "Couldn't load your blocked list."; });
-  $("#logoutBtn").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); me = null; clearInterval(syncTimer); badges.messages = badges.notifications = 0; Call.set(null); renderNav(); toast("Logged out"); location.hash = "#/"; });
+  $("#logoutBtn").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); me = null; stopSync(); badges.messages = badges.notifications = 0; Call.set(null); renderNav(); toast("Logged out"); location.hash = "#/"; });
 }
 
 // ---------- auth ----------

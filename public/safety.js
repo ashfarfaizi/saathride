@@ -85,7 +85,15 @@ function manageLocation() {
   }, () => { /* permission denied or unavailable: check-ins still work */ }, { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 });
 }
 // Keep the session fresh while the app is open (check-in prompts also arrive as notifications and emails).
-safe.timer = setInterval(() => { if (me) refreshSession(); }, 30000);
+// Every 30s during a trip in safety mode, every 2 min otherwise; nothing while the app is asleep.
+let safeTicks = 0;
+safe.timer = setInterval(() => {
+  safeTicks++;
+  if (!me || Pulse.mode() === "asleep") return;
+  if (safe.session || safeTicks % 4 === 0) refreshSession();
+}, 30000);
+Pulse.onWake(() => { if (me) refreshSession(); });
+Pulse.keepAwake = () => !!safe.session;   // /api/safety/active only returns live sessions
 setTimeout(() => { if (me) refreshSession(); }, 1200);
 
 function currentPosition(timeout = 6000) {
@@ -335,7 +343,10 @@ async function viewShare(token) {
   view.innerHTML = `<div class="skeleton"></div>`;
   await draw();
   clearInterval(safe.shareTimer);
-  safe.shareTimer = setInterval(() => { if (location.hash === `#/s/${token}`) draw(); else clearInterval(safe.shareTimer); }, 20000);
+  // A contact watching the live page may not touch it for a long time, so only a hidden tab pauses it.
+  safe.shareTimer = setInterval(() => { if (location.hash !== `#/s/${token}`) return clearInterval(safe.shareTimer); if (!Pulse.hidden()) draw(); }, 20000);
+  if (!safe.shareWake) { safe.shareWake = true; Pulse.onWake(() => { const m = location.hash.match(/^#\/s\/([^/?]+)/); if (m && safe.redrawShare) safe.redrawShare(); }); }
+  safe.redrawShare = draw;
 }
 
 // ---------------- QR boarding ----------------
