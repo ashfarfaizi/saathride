@@ -4,7 +4,7 @@
 
 SaathRide is a coordination platform, **not a transport operator**. Profiles and trips are **not verified** — the app says so, and a college email address only adds an "unverified" label.
 
-Stack: Node 22 · Express 5 · PostgreSQL on **Neon** · photos on **Cloudinary** · maps on **Mapbox** · Saath AI on the **Claude API** · voice calls on **LiveKit** · vanilla HTML/CSS/JS · deploys to **Vercel**.
+Stack: Node 22 · Express 5 · PostgreSQL on **Neon** · photos on **Cloudinary** · maps on **MapLibre + OpenStreetMap** (no key) · Saath AI on the **Claude API** · voice calls on **LiveKit** · vanilla HTML/CSS/JS · deploys to **Vercel**.
 
 Only the database and `JWT_SECRET` are required. Photos, maps, AI and calls are optional: each one switches itself off cleanly (and the UI says so) until its keys are added.
 
@@ -54,20 +54,17 @@ Messaging, the inbox and notifications work without this. Voice calls need a Web
 
 Calls work on `https://` sites (Vercel) and on `http://localhost`; browsers block the microphone on other plain-http addresses.
 
-## 1d. Maps, place search and route matching — Mapbox (optional, ~5 minutes)
+## 1d. Maps, place search and route matching — works with no key
 
-**Why Mapbox (vs Google Maps):** both cover Indian cities well. Mapbox's free tier is larger for an app like this — about **50,000 web map loads and 100,000 geocoding requests a month** free, plus a free Directions allowance — while Google Maps Platform replaced its $200 monthly credit (March 2025) with smaller per-product free caps. Mapbox's GL JS map is also easy to style to match the feed and is served from our own domain here. Both require a card on file to activate the free tier. Check the current numbers on each pricing page before launch.
+Maps are on out of the box, using free open services that need no account or key:
 
-Without a key: posting works (no coordinates), the Explore map shows a friendly "not switched on" message with the list beside it, matching uses place names and times, and "Open in Maps" links still work (they don't need a key).
+- **Map display:** [MapLibre GL JS](https://maplibre.org) (open-source, served from `/vendor/maplibre-gl.js`) drawing [OpenFreeMap](https://openfreemap.org) tiles (OpenStreetMap data, free, no key, no usage limits stated). Set `MAP_STYLE_URL` to use any other MapLibre style.
+- **Place search:** [Photon](https://photon.komoot.io) (OpenStreetMap), limited to India via a bounding box.
+- **Road routes:** the public [OSRM](https://project-osrm.org) server (driving profile).
 
-1. <https://account.mapbox.com> → sign up → **Tokens**. Copy the **Default public token** (starts with `pk.`) or create one.
-2. Recommended: create a token with **URL restrictions** set to your Vercel domain(s) and `http://localhost:3000`.
-3. Add to `.env` and Vercel:
-   ```
-   MAPBOX_TOKEN=pk.xxxxxxxx
-   ```
-   The server uses it for place search and road routes (results are cached in the `geo_cache` table to save quota). The browser map gets the token only if it starts with `pk.` — a secret `sk.` token is never sent to browsers. To use a separate URL-restricted token for the browser, also set `MAPBOX_PUBLIC_TOKEN`.
-4. `npm install` (installs `mapbox-gl`, served from `/vendor/mapbox-gl.js`). Check `/api/config` → `"map": true, "map_status": "ready"`.
+Both lookups run on the server and are cached in `geo_cache` (searches 30 days, routes 90 days), so each place or route is fetched once. The public Photon and OSRM servers are shared, fair-use services meant for light traffic, not a guaranteed production SLA. If SaathRide grows, either point `PHOTON_URL` / `OSRM_URL` at self-hosted instances, or add a Mapbox key: with `MAPBOX_TOKEN` set, search and routes switch to Mapbox automatically (its free tier is about 100,000 geocoding requests a month; check current pricing). The key stays on the server either way. `GEO_PROVIDER=off` turns lookups off entirely (posting and matching then work by place name only).
+
+Check `/api/config` → `"geo": true, "map": true, "map_status": "ready"`.
 
 **Privacy:** trip locations are the landmarks/areas people pick, rounded to 3 decimals (~100 m). "Use my approximate location" in *Match my route* asks for consent, rounds to ~1 km, is used for that one search and is never stored. There is no live location tracking.
 
@@ -98,7 +95,7 @@ Edit `.env`:
 - `JWT_SECRET=` → run `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` and paste the output.
 - `CLOUDINARY_*` → from step 1b (optional but needed for photos).
 - `LIVEKIT_*` → from step 1c (optional, only for voice calls).
-- `MAPBOX_TOKEN` → step 1d (optional). `ANTHROPIC_API_KEY` → step 1e (optional). `ADMIN_EMAILS` → your email, to review reports at `/#/admin` (optional).
+- `MAPBOX_TOKEN` → step 1d (optional; maps work without it). `ANTHROPIC_API_KEY` → step 1e (optional). `ADMIN_EMAILS` → your email, to review reports at `/#/admin` (optional).
 
 ```bash
 npm run migrate     # creates / upgrades the tables in Neon (safe to re-run; also upgrades a database from the previous version)
@@ -121,7 +118,7 @@ The app is one Express function: `api/index.js` exports the app and `vercel.json
    | `DATABASE_URL` | **Yes** | Neon → project → **Connect** → pooled connection string (step 1) |
    | `JWT_SECRET` | Recommended (derived from `DATABASE_URL` if missing) | Any long random string: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
    | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | For photos | Cloudinary → Dashboard / Settings → API Keys (step 1b) |
-   | `MAPBOX_TOKEN` (`MAPBOX_PUBLIC_TOKEN` optional) | For maps & route matching | Mapbox → Tokens (step 1d) |
+   | `MAPBOX_TOKEN` | Optional: Mapbox search & routes instead of the free OSM services | Mapbox → Tokens (step 1d) |
    | `ANTHROPIC_API_KEY` (`AI_MODEL`, `FUEL_PRICE_INR` optional) | For full Saath AI | Anthropic Console → API Keys (step 1e) |
    | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | For voice calls | LiveKit Cloud → Settings → API Keys (step 1c) |
    | `ADMIN_EMAILS` | Optional | Comma-separated emails allowed to review reports |
@@ -181,7 +178,7 @@ npm test
 
 Five suites (47 tests): `api.test.js` (auth, trips, interest workflow, legacy per-trip messages, ratings, rate limits), `social.test.js` (Cloudinary signing incl. the size-capping transformation, photo posts, edit/delete, likes, comments, usernames, privacy, avatars, share links), `messaging.test.js` (conversations, authorization, persistence, inbox, notifications, blocking, reports, call signalling and LiveKit tokens), `discovery.test.js` (matching rules and their evidence labels, cost estimates, trip coordinates and routes, place search and caching, the matching API with exclusions, Saath AI in basic mode and with the Claude API — tool use on real data, cards only from tool results, failure fallback, usage limits — saved routes and alerts, recommendations, communities, people search, trip updates, notification preferences, report review) and `frontend-smoke.test.js` (every screen renders against the real API and escapes hostile text — a stub DOM, **not** a real browser).
 
-`npm test` runs the SQL on Node's built-in SQLite (`test/sqlite-adapter.js`) so it works anywhere. To check against real Postgres, point the suites at a scratch database instead (they create their own tables); they have also been run that way against PostgreSQL 16. External services are never contacted by the tests: Cloudinary, Mapbox, the Claude API and LiveKit are replaced by local fakes, so after adding real keys, click through photos, the map, Saath AI and a call once on the deployed site.
+`npm test` runs the SQL on Node's built-in SQLite (`test/sqlite-adapter.js`) so it works anywhere. To check against real Postgres, point the suites at a scratch database instead (they create their own tables); they have also been run that way against PostgreSQL 16. External services are never contacted by the tests: Cloudinary, the map services (Mapbox, Photon, OSRM), the Claude API and LiveKit are replaced by local fakes, so after adding real keys, click through photos, the map, Saath AI and a call once on the deployed site.
 
 ## Known limits / next up
 
@@ -189,7 +186,7 @@ Five suites (47 tests): `api.test.js` (auth, trips, interest workflow, legacy pe
 - No email verification, password reset or real identity verification yet.
 - Uploads that are abandoned before publishing leave orphan files in Cloudinary (clear them in the Media Library).
 - Comments can't be reported individually yet; posts and members can.
-- Route matching compares against each trip's single stored road route (Mapbox driving profile; bus/metro trips have no transit routing). Distances/times are estimates. Trips posted before maps were configured have no coordinates until their route is edited.
+- Route matching compares against each trip's single stored road route (driving profile from OSRM or Mapbox; bus/metro trips have no transit routing). Distances/times are estimates. Trips posted before maps were configured have no coordinates until their route is edited.
 - Recurring commutes are shown until their listed date passes; there's no automatic "next occurrence" yet — owners repost or edit the date.
 - Saath AI chats aren't saved between sessions. Basic mode understands simpler phrasing only.
 - Messages, badges and incoming calls use polling (Vercel serverless functions can't hold WebSockets). It's reliable but not instant and costs a request every few seconds per open tab. For instant delivery, add a managed realtime service (e.g. Pusher, Ably or LiveKit data channels) and push a "something changed" ping that triggers the same fetches.

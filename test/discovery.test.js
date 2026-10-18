@@ -12,26 +12,40 @@ const { haversineKm } = require("../geo");
 let server, base;
 const day = (n) => new Date(Date.now() + n * 864e5).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 
-// ---- fake Mapbox ----
+// ---- fake map services: Mapbox (with key) and the keyless OSM pair, Photon + OSRM ----
 const PLACES = {
   "howrah station": [88.342, 22.583], "iit kharagpur": [87.310, 22.316], "gol bazar": [87.325, 22.336],
   "salt lake sector v": [88.433, 22.576], "park street": [88.352, 22.553], "uluberia": [88.033, 22.503], "bagnan": [87.97, 22.47],
 };
 const geoCalls = [];
-async function fakeMapbox(url) {
+const routeJson = (a, b) => {
+  const coords = Array.from({ length: 21 }, (_, i) => [a[0] + ((b[0] - a[0]) * i) / 20, a[1] + ((b[1] - a[1]) * i) / 20]);
+  const km = haversineKm({ lng: a[0], lat: a[1] }, { lng: b[0], lat: b[1] }) * 1.15;
+  return { ok: true, json: async () => ({ routes: [{ distance: km * 1000, duration: km * 90, geometry: { coordinates: coords } }] }) };
+};
+const findPlace = (q) => Object.keys(PLACES).find((p) => q.includes(p) || p.includes(q));
+const osmCalls = [];
+async function fakeMapbox(url, opts = {}) {
+  const u = new URL(url);
+  if (u.host === "photon.komoot.io" || u.host === "router.project-osrm.org") {
+    osmCalls.push({ url, headers: opts.headers || {} });
+    if (u.host === "photon.komoot.io") {
+      const k = findPlace((u.searchParams.get("q") || "").toLowerCase());
+      return { ok: true, json: async () => ({ features: k ? [{ geometry: { coordinates: PLACES[k] }, properties: { name: k.replace(/\b\w/g, (c) => c.toUpperCase()), city: "Kolkata", state: "West Bengal" } }] : [] }) };
+    }
+    const [a, b] = u.pathname.split("/").pop().split(";").map((p) => p.split(",").map(Number));
+    return routeJson(a, b);
+  }
   geoCalls.push(url);
   assert.ok(url.includes("access_token=pk.test-map-token"), "server sends the key to Mapbox");
-  const u = new URL(url);
   if (u.pathname.startsWith("/geocoding/")) {
     const q = decodeURIComponent(u.pathname.split("/").pop().replace(".json", "")).toLowerCase();
-    const k = Object.keys(PLACES).find((p) => q.includes(p) || p.includes(q));
+    const k = findPlace(q);
     return { ok: true, json: async () => ({ features: k ? [{ text: k.replace(/\b\w/g, (c) => c.toUpperCase()), place_name: `${k}, West Bengal, India`, center: PLACES[k] }] : [] }) };
   }
   if (u.pathname.startsWith("/directions/")) {
     const [a, b] = u.pathname.split("/").pop().split(";").map((p) => p.split(",").map(Number));
-    const coords = Array.from({ length: 21 }, (_, i) => [a[0] + ((b[0] - a[0]) * i) / 20, a[1] + ((b[1] - a[1]) * i) / 20]);
-    const km = haversineKm({ lng: a[0], lat: a[1] }, { lng: b[0], lat: b[1] }) * 1.15;
-    return { ok: true, json: async () => ({ routes: [{ distance: km * 1000, duration: km * 90, geometry: { coordinates: coords } }] }) };
+    return routeJson(a, b);
   }
   return { ok: false, status: 404, json: async () => ({}) };
 }
@@ -137,12 +151,12 @@ test("trips get approximate coordinates + a road route when the map service is c
     await o.get("/api/geo/search?q=park street");
     assert.equal(geoCalls.length, before + 1, "second identical search served from cache");
     const cfg = (await new Client().get("/api/config")).data;
-    assert.equal(cfg.geo, true); assert.equal(cfg.map, true); assert.equal(cfg.map_token, "pk.test-map-token");
-    assert.match((await fetch(base + "/")).headers.get("content-security-policy"), /api\.mapbox\.com/);
+    assert.equal(cfg.geo, true); assert.equal(cfg.map, true); assert.equal(cfg.map_style, "https://tiles.openfreemap.org/styles/liberty");
+    assert.ok(!JSON.stringify(cfg).includes("pk.test-map-token"), "the Mapbox key stays on the server");
+    const csp = (await fetch(base + "/")).headers.get("content-security-policy");
+    assert.match(csp, /connect-src[^;]*https:\/\/tiles\.openfreemap\.org/); assert.match(csp, /worker-src 'self' blob:/);
+    assert.equal((await fetch(base + "/vendor/maplibre-gl.js")).status, 200);
   } finally { mapOff(); }
-  // a secret (sk.) token is never sent to browsers
-  process.env.MAPBOX_TOKEN = "sk.secret";
-  try { assert.equal((await new Client().get("/api/config")).data.map_token, ""); } finally { mapOff(); }
   // without a key: posting still works, just without coordinates
   const o2 = await signup("Plain Owner");
   const p = await trip(o2, { origin: "Gol Bazar", destination: "IIT Kharagpur Main Gate" });
@@ -335,4 +349,20 @@ test("report review is only for ADMIN_EMAILS accounts", async () => {
     assert.equal((await admin.post(`/api/admin/reports/user/${r.user_reports[0].id}`, { status: "resolved" })).data.status, "resolved");
     assert.equal((await admin.post(`/api/admin/reports/nope/1`, { status: "resolved" })).status, 404);
   } finally { delete process.env.ADMIN_EMAILS; }
+});
+
+test("keyless maps: OpenStreetMap search + OSRM routes, no API key anywhere", async () => {
+  process.env.GEO_PROVIDER = "osm";
+  try {
+    const o = await signup("Osm Owner");
+    const t = await trip(o, { origin: "Uluberia", destination: "Bagnan" });
+    assert.deepEqual(t.geo.origin, { lat: 22.503, lng: 88.033 }); assert.equal(t.geo.has_route, true);
+    const s = (await o.get("/api/geo/search?q=salt lake sector v")).data;
+    assert.equal(s.enabled, true); assert.equal(s.places[0].name, "Salt Lake Sector V"); assert.match(s.places[0].label, /Kolkata, West Bengal/);
+    const photon = osmCalls.find((c) => c.url.includes("photon.komoot.io") && c.url.includes("salt"));
+    assert.match(photon.url, /bbox=68\.1,6\.5,97\.5,35\.7/, "results limited to India");
+    assert.ok(osmCalls.some((c) => c.url.startsWith("https://router.project-osrm.org/route/v1/driving/")));
+    for (const c of osmCalls) { assert.ok(!/token|key=/i.test(c.url)); assert.match(c.headers["User-Agent"], /^SaathRide\//, "identifies itself per OSM policy"); }
+    assert.equal((await new Client().get("/api/config")).data.geo, true);
+  } finally { delete process.env.GEO_PROVIDER; }
 });
