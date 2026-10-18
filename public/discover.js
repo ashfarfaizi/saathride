@@ -39,35 +39,62 @@ function loadAsset(tag, attrs) {
 
 // ---------- place picker (autocomplete through our server; the map key stays private) ----------
 const placePicks = {};
-function wirePlacePickers(ids) {
+// Suggestions as you type: ↑/↓ to move, Enter to pick, Esc to close. onPick(id, place) runs after a pick.
+function wirePlacePickers(ids, { onPick } = {}) {
   if (!config.geo) return;
   for (const id of ids) {
-    const input = $(`#${id}`); if (!input || !input.parentElement) continue;
-    const list = document.createElement("div"); list.className = "place-list"; list.hidden = true; list.setAttribute("role", "listbox");
+    const input = $(`#${id}`); if (!input || !input.parentElement || input.dataset.places) continue;
+    input.dataset.places = "1";
+    const list = document.createElement("div"); list.className = "place-list"; list.hidden = true;
+    list.id = `${id}_list`; list.setAttribute("role", "listbox");
     input.parentElement.classList.add("place-field"); input.parentElement.appendChild(list);
-    input.setAttribute("autocomplete", "off"); input.setAttribute("aria-autocomplete", "list");
-    let deb, items = [];
+    input.setAttribute("autocomplete", "off"); input.setAttribute("role", "combobox"); input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-controls", list.id); input.setAttribute("aria-expanded", "false");
+    let deb, items = [], active = -1, seq = 0;
+    const show = (on) => { list.hidden = !on; input.setAttribute("aria-expanded", on ? "true" : "false"); if (!on) { active = -1; input.removeAttribute("aria-activedescendant"); } };
+    const highlight = (i) => {
+      active = i;
+      list.querySelectorAll("[data-i]").forEach((b, n) => { b.classList.toggle("active", n === i); b.setAttribute("aria-selected", n === i ? "true" : "false"); });
+      const el = list.querySelector(`[data-i="${i}"]`);
+      if (el) { input.setAttribute("aria-activedescendant", el.id); el.scrollIntoView({ block: "nearest" }); }
+    };
+    const pick = (i) => {
+      const p = items[i]; if (!p) return;
+      input.value = p.name.slice(0, 80); placePicks[id] = { lat: p.lat, lng: p.lng, label: p.label };
+      input.parentElement.classList.add("picked"); show(false);
+      if (onPick) onPick(id, p);
+    };
     input.addEventListener("input", () => {
       delete placePicks[id]; input.parentElement.classList.remove("picked");
       clearTimeout(deb);
       const q = input.value.trim();
-      if (q.length < 2) { list.hidden = true; return; }
+      if (q.length < 2) { show(false); return; }
+      items = []; list.innerHTML = `<div class="place-hint">Searching…</div>`; show(true);
       deb = setTimeout(async () => {
+        const mine = ++seq;   // ignore answers to older keystrokes that arrive late
         try {
           const d = await api(`/api/geo/search?q=${encodeURIComponent(q)}`);
+          if (mine !== seq) return;
           items = d.places || [];
-          list.innerHTML = items.map((p, i) => `<button type="button" role="option" data-i="${i}">${ICON.pin}<span><b>${esc(p.name)}</b><small>${esc(p.label)}</small></span></button>`).join("");
-          list.hidden = !items.length;
-        } catch { list.hidden = true; }
+          list.innerHTML = items.length
+            ? items.map((p, i) => `<button type="button" role="option" id="${id}_opt${i}" data-i="${i}" aria-selected="false">${ICON.pin}<span><b>${esc(p.name)}</b><small>${esc(p.label)}</small></span></button>`).join("")
+            : `<div class="place-hint">No matching places — you can still search for "${esc(q)}".</div>`;
+          active = -1; show(document.activeElement === input);
+        } catch { if (mine === seq) show(false); }
       }, 250);
     });
-    list.addEventListener("click", (e) => {
-      const b = e.target.closest("[data-i]"); if (!b) return;
-      const p = items[Number(b.dataset.i)];
-      input.value = p.name.slice(0, 80); placePicks[id] = { lat: p.lat, lng: p.lng, label: p.label };
-      input.parentElement.classList.add("picked"); list.hidden = true;
+    input.addEventListener("keydown", (e) => {
+      if (list.hidden || !items.length) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); highlight((active + 1) % items.length); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); highlight(active <= 0 ? items.length - 1 : active - 1); }
+      else if (e.key === "Enter" && active >= 0) { e.preventDefault(); pick(active); }
+      else if (e.key === "Escape") { e.preventDefault(); show(false); }
     });
-    input.addEventListener("blur", () => setTimeout(() => { list.hidden = true; }, 200));
+    // pointerdown + preventDefault keeps focus in the input, so the pick isn't lost to blur.
+    list.addEventListener("pointerdown", (e) => { const b = e.target.closest("[data-i]"); if (!b) return; e.preventDefault(); pick(Number(b.dataset.i)); });
+    list.addEventListener("click", (e) => { const b = e.target.closest("[data-i]"); if (b && !list.hidden) pick(Number(b.dataset.i)); });
+    input.addEventListener("focus", () => { if (items.length && input.value.trim().length >= 2 && !placePicks[id]) show(true); });
+    input.addEventListener("blur", () => setTimeout(() => show(false), 150));
   }
 }
 const pickedPoint = (id) => (placePicks[id] ? { lat: placePicks[id].lat, lng: placePicks[id].lng } : null);
@@ -151,6 +178,7 @@ function exploreJourneys(p) {
   $("#exploreBody").innerHTML = `
     <form id="filterForm" class="search-bar card">
       <label class="search-wrap grow">${ICON.search}<input id="f_d" name="destination" value="${esc(p.destination || "")}" placeholder="Where to? e.g. IIT Kharagpur" aria-label="Destination" /></label>
+      <input type="hidden" id="f_near" name="near" value="${esc(/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(p.near || "") ? p.near : "")}" />
       <input type="date" name="date" value="${esc(p.date || "")}" aria-label="Date" class="date-in" />
       <button class="btn">Search</button>
       <details class="more-filters" ${active > (p.destination ? 1 : 0) + (p.date ? 1 : 0) ? "open" : ""}>
@@ -184,7 +212,15 @@ function exploreJourneys(p) {
     const target = "#/explore" + (q.toString() ? "?" + q : "");
     if (location.hash === target) route(); else location.hash = target;
   });
-  const filters = { ...p }; delete filters.view; delete filters.tab;
+  // Typing a new destination by hand drops the picked place's map position.
+  $("#f_d").addEventListener("input", () => { $("#f_near").value = ""; });
+  wirePlacePickers(["f_d", "f_o"], { onPick: (id, place) => {
+    if (id !== "f_d") return;
+    $("#f_near").value = `${place.lat},${place.lng}`;
+    $("#filterForm").requestSubmit();
+  } });
+  const filters = { ...p }; delete filters.view; delete filters.tab; delete filters.near;
+  exploreState.near = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(p.near || "") ? p.near.split(",").map(Number) : null;
   if (mode === "list") {
     feedState = { offset: 0, params: filters, target: "#results", render: tile,
       empty: `<div class="card empty"><p><strong>No journeys match yet.</strong></p><p class="mt8">Try a wider search — or post your own and let people find you.</p><p class="mt12"><a class="btn" href="#/${me ? "post" : "signup"}">${me ? "Share a journey" : "Join SaathRide"}</a></p></div>` };
@@ -220,7 +256,15 @@ async function loadMapView(filters) {
       pts.push([t.geo.origin.lng, t.geo.origin.lat]);
       if (t.geo.dest) pts.push([t.geo.dest.lng, t.geo.dest.lat]);
     }
-    if (pts.length) map.fitBounds(MapKit.bounds(pts), { padding: 50, maxZoom: 12, duration: 0 });
+    // The place the person searched for: mark it and keep it in view, even when nothing matches yet.
+    const near = exploreState.near;
+    if (near) {
+      const [lat, lng] = near;
+      exploreState.markers.push(MapKit.marker(MapKit.pin("dest", "Searched place")).setLngLat([lng, lat]).addTo(map));
+      pts.push([lng, lat]);
+    }
+    if (pts.length > 1) map.fitBounds(MapKit.bounds(pts), { padding: 50, maxZoom: 12, duration: 0 });
+    else if (pts.length === 1) map.jumpTo({ center: pts[0], zoom: 12 });
   } catch (e) {
     el.innerHTML = `<div class="map-msg">${ICON.map}<p>${esc(mapFailText(e))}</p></div>`;
     el.classList && el.classList.add("off");
