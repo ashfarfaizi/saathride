@@ -2,19 +2,22 @@
 const { validLat, validLng, round3, haversineKm } = require("./geo");
 const { rankTrips } = require("./matching");
 
+// The browser map is MapLibre GL JS (open-source, no key) served from our own origin, drawing
+// OpenFreeMap vector tiles (free, no key, OSM data). MAP_STYLE_URL swaps in any MapLibre style.
 function findMapSdk() {
   const out = {};
-  for (const [k, id] of [["js", "mapbox-gl/dist/mapbox-gl.js"], ["css", "mapbox-gl/dist/mapbox-gl.css"]]) {
+  for (const [k, id] of [["js", "maplibre-gl/dist/maplibre-gl.js"], ["css", "maplibre-gl/dist/maplibre-gl.css"]]) {
     try { out[k] = require.resolve(id); } catch { /* not installed */ }
   }
   return out.js && out.css ? out : null;
 }
-// Only a public (pk.) token may ever reach the browser.
-const publicMapToken = () => {
-  const t = process.env.MAPBOX_PUBLIC_TOKEN || process.env.MAPBOX_TOKEN || "";
-  return t.startsWith("pk.") ? t : "";
+const DEFAULT_MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const mapStyleUrl = () => {
+  const s = process.env.MAP_STYLE_URL || DEFAULT_MAP_STYLE;
+  try { return new URL(s).protocol === "https:" ? s : DEFAULT_MAP_STYLE; } catch { return DEFAULT_MAP_STYLE; }
 };
-const mapConnectSources = () => (publicMapToken() ? ["https://api.mapbox.com", "https://events.mapbox.com", "https://*.tiles.mapbox.com"] : []);
+// The style, its tiles, sprites and fonts all come from the style's host.
+const mapConnectSources = (sdk) => (sdk ? [new URL(mapStyleUrl()).origin] : []);
 
 // Parse a place given by the client: { label, lat?, lng? }.
 function placeParam(v, clean) {
@@ -68,8 +71,8 @@ function createExplore({ db, geo, HttpError, bad, clean }) {
   const stripGeo = (t) => { const { geo: g, ...rest } = t; return { ...rest, geo: g ? { origin: g.origin, dest: g.dest, distance_m: g.distance_m, duration_s: g.duration_s, has_route: g.has_route } : null }; };
 
   function register(app, { auth, optionalAuth, writeLimit, intParam, candidates, L, sdk }) {
-    app.get("/vendor/mapbox-gl.js", (_req, res) => { if (!sdk) return res.status(404).type("text").send("Map SDK not installed"); res.set("Cache-Control", "public, max-age=86400").type("application/javascript").sendFile(sdk.js); });
-    app.get("/vendor/mapbox-gl.css", (_req, res) => { if (!sdk) return res.status(404).type("text").send("Map SDK not installed"); res.set("Cache-Control", "public, max-age=86400").type("text/css").sendFile(sdk.css); });
+    app.get("/vendor/maplibre-gl.js", (_req, res) => { if (!sdk) return res.status(404).type("text").send("Map SDK not installed"); res.set("Cache-Control", "public, max-age=86400").type("application/javascript").sendFile(sdk.js); });
+    app.get("/vendor/maplibre-gl.css", (_req, res) => { if (!sdk) return res.status(404).type("text").send("Map SDK not installed"); res.set("Cache-Control", "public, max-age=86400").type("text/css").sendFile(sdk.css); });
 
     // Place autocomplete for the composer and route search (server-side, so the map key stays private).
     app.get("/api/geo/search", optionalAuth, writeLimit("geo", L.geo, 60_000), async (req, res) => {
@@ -110,4 +113,4 @@ function createExplore({ db, geo, HttpError, bad, clean }) {
   return { register, resolveTripGeo, pointParam, match, resolvePlace, stripGeo, routeBetween };
 }
 
-module.exports = { createExplore, findMapSdk, publicMapToken, mapConnectSources, placeParam };
+module.exports = { createExplore, findMapSdk, mapStyleUrl, mapConnectSources, placeParam, DEFAULT_MAP_STYLE };

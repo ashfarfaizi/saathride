@@ -7,7 +7,7 @@ const path = require("path");
 const db = require("./db");
 const { createMessaging, livekitConnectSources } = require("./messaging");
 const { createGeo } = require("./geo");
-const { createExplore, findMapSdk, publicMapToken, mapConnectSources } = require("./explore");
+const { createExplore, findMapSdk, mapStyleUrl, mapConnectSources } = require("./explore");
 const { createAi } = require("./ai");
 const { createSocial } = require("./social");
 
@@ -255,8 +255,8 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   const chat = createMessaging({ db, HttpError, bad, clean, ...(livekitSdk !== undefined ? { sdkPath: livekitSdk } : {}) });
   const { notify } = chat;
   const csp = () => ["default-src 'self'", "script-src 'self'", "style-src 'self' https://fonts.googleapis.com", "font-src https://fonts.gstatic.com",
-    `img-src 'self' data: blob: https://res.cloudinary.com${publicMapToken() ? " https://api.mapbox.com" : ""}`, `connect-src 'self' https://api.cloudinary.com ${[...livekitConnectSources(), ...mapConnectSources()].join(" ")}`.trim(),
-    publicMapToken() ? "worker-src 'self' blob:" : "", publicMapToken() ? "child-src blob:" : "",
+    `img-src 'self' data: blob: https://res.cloudinary.com${sdk ? " " + mapConnectSources(sdk).join(" ") : ""}`, `connect-src 'self' https://api.cloudinary.com ${[...livekitConnectSources(), ...mapConnectSources(sdk)].join(" ")}`.trim(),
+    sdk ? "worker-src 'self' blob:" : "", sdk ? "child-src blob:" : "",
     "media-src 'self' blob:", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'"].filter(Boolean).join("; ");
   const app = express();
   app.set("trust proxy", 1);
@@ -268,7 +268,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
       "X-Frame-Options": "DENY",
       "Referrer-Policy": "strict-origin-when-cross-origin",
       "Content-Security-Policy": csp(),
-      "Permissions-Policy": "camera=(), geolocation=(), microphone=(self)",
+      "Permissions-Policy": "camera=(), geolocation=(self), microphone=(self)",
     });
     next();
   });
@@ -307,7 +307,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
 
   // public, non-secret capabilities the UI needs (is photo upload configured?)
   app.get("/api/config", (_req, res) => res.json({ uploads: uploadsEnabled(), max_images: MAX_IMAGES, caption_max: CAPTION_MAX, calls: chat.callsEnabled(), calls_status: chat.callsStatus(),
-    geo: geo.enabled(), map: !!(publicMapToken() && sdk), map_token: sdk ? publicMapToken() : "", map_status: !publicMapToken() ? "not_configured" : !sdk ? "sdk_missing" : "ready",
+    geo: geo.enabled(), map: !!sdk, map_style: sdk ? mapStyleUrl() : "", map_status: sdk ? "ready" : "sdk_missing",
     ai: ai.enabled(), ai_status: ai.status() }));
 
   chat.register(app, { auth, writeLimit, intParam, likeEscape, L });

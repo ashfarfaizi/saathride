@@ -73,28 +73,36 @@ function wirePlacePickers(ids) {
 const pickedPoint = (id) => (placePicks[id] ? { lat: placePicks[id].lat, lng: placePicks[id].lng } : null);
 const pickedPlace = (id) => { const el = $(`#${id}`); const v = el ? el.value.trim() : ""; if (!v) return null; return placePicks[id] ? { label: v, lat: placePicks[id].lat, lng: placePicks[id].lng } : { label: v }; };
 
-// ---------- map (Mapbox GL JS, served from our own origin) ----------
+// ---------- map (MapLibre GL JS served from our own origin + OpenFreeMap tiles — no API key) ----------
 const MapKit = {
   async load() {
-    if (!config.map) throw new Error("not_configured");
-    if (window.mapboxgl) return window.mapboxgl;
-    if (!this._p) this._p = Promise.all([loadAsset("link", { rel: "stylesheet", href: "/vendor/mapbox-gl.css" }), loadAsset("script", { src: "/vendor/mapbox-gl.js" })]);
+    if (!config.map) throw new Error(config.map_status === "sdk_missing" ? "sdk" : "not_configured");
+    if (window.maplibregl) return window.maplibregl;
+    if (!this._p) this._p = Promise.all([loadAsset("link", { rel: "stylesheet", href: "/vendor/maplibre-gl.css" }), loadAsset("script", { src: "/vendor/maplibre-gl.js" })]);
     await this._p;
-    if (!window.mapboxgl) throw new Error("sdk");
-    window.mapboxgl.accessToken = config.map_token;
-    return window.mapboxgl;
+    if (!window.maplibregl) throw new Error("sdk");
+    return window.maplibregl;
+  },
+  webgl() {
+    try { const c = document.createElement("canvas"); return !!(c.getContext("webgl2") || c.getContext("webgl")); } catch { return false; }
   },
   async create(el, opts = {}) {
     const gl = await this.load();
-    if (gl.supported && !gl.supported()) throw new Error("webgl");
-    const map = new gl.Map({ container: el, style: "mapbox://styles/mapbox/streets-v12", center: opts.center || [88.36, 22.57], zoom: opts.zoom || 8, cooperativeGestures: !!opts.cooperative, attributionControl: true });
+    if (!this.webgl()) throw new Error("webgl");
+    el.innerHTML = "";
+    const map = new gl.Map({ container: el, style: config.map_style, center: opts.center || [88.36, 22.57], zoom: opts.zoom || 8, cooperativeGestures: !!opts.cooperative });
     map.addControl(new gl.NavigationControl({ showCompass: false }), "top-right");
-    await new Promise((res) => { if (map.loaded && map.loaded()) res(); else map.on("load", res); });
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error("tiles")), 15000);
+      map.once("load", () => { clearTimeout(t); res(); });
+    });
     map.addSource("route", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "route-casing", type: "line", source: "route", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#ffffff", "line-width": 9 } });
     map.addLayer({ id: "route", type: "line", source: "route", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#0e7c66", "line-width": 5 } });
     return map;
   },
+  marker(el) { return new window.maplibregl.Marker({ element: el }); },
+  bounds(pts) { return pts.reduce((b, c) => b.extend(c), new window.maplibregl.LngLatBounds(pts[0], pts[0])); },
   pin(kind, label = "") {
     const el = document.createElement("button");
     el.type = "button"; el.className = `pin ${kind}`; el.setAttribute("aria-label", label); el.innerHTML = kind === "dest" ? "" : `<span>${esc(label.slice(0, 2))}</span>`;
@@ -104,15 +112,13 @@ const MapKit = {
     const line = coords && coords.length > 1 ? coords : origin && dest ? [[origin.lng, origin.lat], [dest.lng, dest.lat]] : null;
     map.getSource("route").setData({ type: "FeatureCollection", features: line ? [{ type: "Feature", properties: { approx: !coords }, geometry: { type: "LineString", coordinates: line } }] : [] });
     map.setPaintProperty("route", "line-dasharray", coords ? [1, 0] : [2, 2]);
-    if (line) {
-      const b = line.reduce((bb, c) => bb.extend(c), new window.mapboxgl.LngLatBounds(line[0], line[0]));
-      map.fitBounds(b, { padding: 60, maxZoom: 13, duration: 600 });
-    }
+    if (line) map.fitBounds(this.bounds(line), { padding: 60, maxZoom: 13, duration: 600 });
   },
 };
 const mapFailText = (e) => ({
-  not_configured: "The map isn't switched on for this site yet (it needs a Mapbox key). The list below shows the same journeys.",
+  not_configured: "The map is switched off on this site. The list below shows the same journeys.",
   sdk: "The map couldn't load. Check your connection — the list below still works.",
+  tiles: "The map tiles are taking too long to load. The list below still works.",
   webgl: "Your browser can't show interactive maps (WebGL is off). The list below shows the same journeys.",
 }[e.message] || "The map couldn't load right now. The list below still works.");
 
@@ -193,8 +199,11 @@ async function loadMapView(filters) {
     : `<div class="empty small-empty"><p><strong>No journeys ${Object.keys(filters).length ? "match these filters" : "on the map yet"}.</strong></p><p class="muted mt8">${config.geo ? "Journeys appear here when they're posted with a place picked from suggestions." : ""} Try the list view or widen your search.</p></div>`;
   for (const t of trips) tripCache.set(t.id, t);
   const el = $("#exMap");
+  if (exploreState.map) { try { exploreState.map.remove(); } catch { /* already gone */ } exploreState.map = null; }
+  exploreState.markers = [];
   try {
     const map = exploreState.map = await MapKit.create(el, { cooperative: true });
+    el.classList && el.classList.remove("off");
     exploreState.markers.forEach((m) => m.remove()); exploreState.markers = [];
     const pts = [];
     for (const t of trips) {
@@ -202,11 +211,11 @@ async function loadMapView(filters) {
       const pinEl = MapKit.pin("origin", (VEHICLES[t.vehicle_type] || ["•"])[0]);
       pinEl.setAttribute("aria-label", `${t.origin} to ${t.destination}, ${fmtDate(t.depart_date)} ${fmtTime(t.depart_time)}`);
       pinEl.addEventListener("click", () => selectMapTrip(t.id));
-      exploreState.markers.push(new window.mapboxgl.Marker({ element: pinEl }).setLngLat([t.geo.origin.lng, t.geo.origin.lat]).addTo(map));
+      exploreState.markers.push(MapKit.marker(pinEl).setLngLat([t.geo.origin.lng, t.geo.origin.lat]).addTo(map));
       pts.push([t.geo.origin.lng, t.geo.origin.lat]);
       if (t.geo.dest) pts.push([t.geo.dest.lng, t.geo.dest.lat]);
     }
-    if (pts.length) map.fitBounds(pts.reduce((b, c) => b.extend(c), new window.mapboxgl.LngLatBounds(pts[0], pts[0])), { padding: 50, maxZoom: 12, duration: 0 });
+    if (pts.length) map.fitBounds(MapKit.bounds(pts), { padding: 50, maxZoom: 12, duration: 0 });
   } catch (e) {
     el.innerHTML = `<div class="map-msg">${ICON.map}<p>${esc(mapFailText(e))}</p></div>`;
     el.classList && el.classList.add("off");
@@ -229,7 +238,7 @@ async function selectMapTrip(id) {
   if (map && r && (r.coords || (r.origin && r.dest))) {
     MapKit.showRoute(map, r.coords, r.origin, r.dest);
     if (exploreState.destMarker) exploreState.destMarker.remove();
-    if (r.dest) exploreState.destMarker = new window.mapboxgl.Marker({ element: MapKit.pin("dest", "Destination") }).setLngLat([r.dest.lng, r.dest.lat]).addTo(map);
+    if (r.dest) exploreState.destMarker = MapKit.marker(MapKit.pin("dest", "Destination")).setLngLat([r.dest.lng, r.dest.lat]).addTo(map);
   }
 }
 
@@ -399,8 +408,8 @@ async function tripExtras(t) {
     try {
       const r = await api(`/api/trips/${t.id}/route`);
       const map = await MapKit.create($("#tripMap"), { cooperative: true, center: r.origin ? [r.origin.lng, r.origin.lat] : undefined, zoom: 10 });
-      if (r.origin) new window.mapboxgl.Marker({ element: MapKit.pin("origin", (VEHICLES[t.vehicle_type] || ["•"])[0]) }).setLngLat([r.origin.lng, r.origin.lat]).addTo(map);
-      if (r.dest) new window.mapboxgl.Marker({ element: MapKit.pin("dest", "Destination") }).setLngLat([r.dest.lng, r.dest.lat]).addTo(map);
+      if (r.origin) MapKit.marker(MapKit.pin("origin", (VEHICLES[t.vehicle_type] || ["•"])[0])).setLngLat([r.origin.lng, r.origin.lat]).addTo(map);
+      if (r.dest) MapKit.marker(MapKit.pin("dest", "Destination")).setLngLat([r.dest.lng, r.dest.lat]).addTo(map);
       MapKit.showRoute(map, r.coords, r.origin, r.dest);
     } catch (e) { const m = $("#tripMap"); if (m) m.innerHTML = `<div class="map-msg"><p>${esc(mapFailText(e))}</p></div>`; }
   }

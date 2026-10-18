@@ -4,7 +4,7 @@
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
   "functions": {
     "api/index.js": {
-      "includeFiles": "{public/**,schema.sql,schema_upgrade.sql,node_modules/livekit-client/dist/livekit-client.umd.js,node_modules/mapbox-gl/dist/mapbox-gl.js,node_modules/mapbox-gl/dist/mapbox-gl.css}",
+      "includeFiles": "{public/**,schema.sql,schema_upgrade.sql,node_modules/livekit-client/dist/livekit-client.umd.js,node_modules/maplibre-gl/dist/maplibre-gl.js,node_modules/maplibre-gl/dist/maplibre-gl.css}",
       "maxDuration": 30
     }
   }
