@@ -17,7 +17,7 @@ const mapStyleUrl = () => {
   try { return new URL(s).protocol === "https:" ? s : DEFAULT_MAP_STYLE; } catch { return DEFAULT_MAP_STYLE; }
 };
 // The style, its tiles, sprites and fonts all come from the style's host.
-const mapConnectSources = (sdk) => (sdk ? [new URL(mapStyleUrl()).origin] : []);
+const mapConnectSources = () => [new URL(mapStyleUrl()).origin];
 
 // Parse a place given by the client: { label, lat?, lng? }.
 function placeParam(v, clean) {

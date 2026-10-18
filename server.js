@@ -255,8 +255,10 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   const chat = createMessaging({ db, HttpError, bad, clean, ...(livekitSdk !== undefined ? { sdkPath: livekitSdk } : {}) });
   const { notify } = chat;
   const csp = () => ["default-src 'self'", "script-src 'self'", "style-src 'self' https://fonts.googleapis.com", "font-src https://fonts.gstatic.com",
-    `img-src 'self' data: blob: https://res.cloudinary.com${sdk ? " " + mapConnectSources(sdk).join(" ") : ""}`, `connect-src 'self' https://api.cloudinary.com ${[...livekitConnectSources(), ...mapConnectSources(sdk)].join(" ")}`.trim(),
-    sdk ? "worker-src 'self' blob:" : "", sdk ? "child-src blob:" : "",
+    // Map entries are unconditional: Vercel serves index.html from its CDN with headers captured at
+    // build time, so the page's policy must not depend on anything detected at runtime.
+    `img-src 'self' data: blob: https://res.cloudinary.com ${mapConnectSources().join(" ")}`, `connect-src 'self' https://api.cloudinary.com ${[...livekitConnectSources(), ...mapConnectSources()].join(" ")}`.trim(),
+    "worker-src 'self' blob:", "child-src blob:",
     "media-src 'self' blob:", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'"].filter(Boolean).join("; ");
   const app = express();
   app.set("trust proxy", 1);
