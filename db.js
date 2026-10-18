@@ -12,8 +12,11 @@ if (process.env.NODE_ENV === "test") {
   // Reuse the pool across warm serverless invocations.
   function getPool() {
     if (!globalThis.__saathridePool) {
-      const url = process.env.DATABASE_URL;
-      if (!url) throw new Error("DATABASE_URL is not set (add your Neon connection string to the environment)");
+      const raw = process.env.DATABASE_URL;
+      if (!raw) throw new Error("DATABASE_URL is not set (add your Neon connection string to the environment)");
+      // pg already treats sslmode=require as full certificate verification; saying so explicitly
+      // keeps that behaviour across pg upgrades and silences its per-connection deprecation warning.
+      const url = raw.replace(/([?&]sslmode=)(require|prefer|verify-ca)\b/, "$1verify-full");
       const pool = new Pool({
         connectionString: url,       // Neon strings already contain ?sslmode=require
         max: 5,                      // small: Neon's pooled endpoint multiplexes connections

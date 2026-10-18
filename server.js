@@ -977,7 +977,10 @@ ${pic ? `<meta property="og:image" content="${escHtml(pic)}" /><meta name="twitt
 
   // ----- static + fallbacks -----
   app.use("/api", (_req, _res, next) => next(new HttpError(404, "Not found")));
-  app.use(express.static(path.join(__dirname, "public"), { maxAge: IS_PROD ? "1h" : 0 }));
+  // HTML/JS/CSS are revalidated on every visit (cheap 304s via ETag) so a deploy reaches everyone at
+  // once — these files aren't content-hashed, so a cached copy would mix old pages with new APIs.
+  app.use(express.static(path.join(__dirname, "public"), { maxAge: IS_PROD ? "1h" : 0,
+    setHeaders: (res, file) => { if (/\.(html|js|css)$/.test(file)) res.setHeader("Cache-Control", "no-cache"); } }));
   app.use((req, res, next) => (req.method === "GET" ? res.sendFile(path.join(__dirname, "public", "index.html")) : next(new HttpError(404, "Not found"))));
 
   // eslint-disable-next-line no-unused-vars
