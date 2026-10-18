@@ -13,11 +13,12 @@ const UPDATE_KINDS = {
   arrived: () => "Arrived",
   note: () => "",
 };
-const PREF_KEYS = [...new Set(Object.values(NOTIF_CATEGORY))];
+// "safety" isn't switchable (those always arrive), so it isn't offered as a preference.
+const PREF_KEYS = [...new Set(Object.values(NOTIF_CATEGORY))].filter((k) => k !== "safety").concat("email");   // "email": master switch for email copies
 const normCollege = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const adminEmails = () => (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
 
-function createSocial({ db, HttpError, bad, clean, chat, explore, candidates, getTrip, tripViews, TRIP_SELECT, todayStr, TZ, publicProfile, RATING_COLS }) {
+function createSocial({ db, HttpError, bad, clean, chat, explore, candidates, getTrip, tripViews, TRIP_SELECT, WOMEN_GATE, todayStr, TZ, publicProfile, RATING_COLS }) {
   const notify = chat.notify;
   const isAdmin = async (userId) => {
     const list = adminEmails(); if (!list.length) return false;
@@ -122,7 +123,7 @@ function createSocial({ db, HttpError, bad, clean, chat, explore, candidates, ge
       }
       const meRow = await db.one("SELECT college FROM users WHERE id = $1", [me]);
       if (meRow && normCollege(meRow.college)) {
-        const rows = await db.query(`${TRIP_SELECT} WHERE t.status = 'open' AND t.depart_date >= $2 AND t.owner_id <> $1 AND u.show_college = 1
+        const rows = await db.query(`${TRIP_SELECT} WHERE t.status = 'open' AND t.depart_date >= $2 AND t.owner_id <> $1 AND u.show_college = 1 AND ${WOMEN_GATE}
             AND LOWER(TRIM(u.college)) = $3 AND (SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3
             AND NOT EXISTS (SELECT 1 FROM blocked_users b WHERE (b.blocker_id = $1 AND b.blocked_id = t.owner_id) OR (b.blocker_id = t.owner_id AND b.blocked_id = $1))
             ORDER BY t.depart_date, t.depart_time LIMIT 6`, [me, todayStr(), normCollege(meRow.college)]);
@@ -145,7 +146,7 @@ function createSocial({ db, HttpError, bad, clean, chat, explore, candidates, ge
       const [members, count, trips] = await Promise.all([
         db.query(`SELECT u.*, ${RATING_COLS} FROM users u WHERE u.show_college = 1 AND LOWER(TRIM(u.college)) = $2 AND ${block} ORDER BY u.id DESC LIMIT 30`, [me, key]),
         db.one(`SELECT CAST(COUNT(*) AS INTEGER) AS n FROM users u WHERE u.show_college = 1 AND LOWER(TRIM(u.college)) = $2 AND ${block}`, [me, key]),
-        db.query(`${TRIP_SELECT} WHERE t.status = 'open' AND t.depart_date >= $3 AND u.show_college = 1 AND LOWER(TRIM(u.college)) = $2 AND ${block}
+        db.query(`${TRIP_SELECT} WHERE t.status = 'open' AND t.depart_date >= $3 AND u.show_college = 1 AND LOWER(TRIM(u.college)) = $2 AND ${block} AND ${WOMEN_GATE}
                   AND (SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3 ORDER BY t.depart_date, t.depart_time LIMIT 30`, [me, key, todayStr()]),
       ]);
       res.json({ name: members[0] ? members[0].college : name, is_mine: normCollege(mine.college) === key, member_count: count.n,

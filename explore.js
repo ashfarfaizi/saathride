@@ -64,7 +64,7 @@ function createExplore({ db, geo, HttpError, bad, clean }) {
   async function match(viewerId, query, candidates, limit = 20) {
     const from = await resolvePlace(query.from);
     const to = await resolvePlace(query.to, from && from.lat !== undefined ? from : undefined);
-    const trips = await candidates(viewerId, { date: query.date, vehicle_type: query.vehicle_type, min_seats: query.min_seats });
+    const trips = await candidates(viewerId, { date: query.date, vehicle_type: query.vehicle_type, min_seats: query.min_seats, women_only: !!query.women_only });
     const ranked = rankTrips(trips, { from, to, date: query.date, time: query.time, flex: query.flex }, limit);
     return { from, to, results: ranked.map(({ trip, m }) => ({ trip: stripGeo(trip), score: m.score, reasons: m.reasons })) };
   }
@@ -86,7 +86,10 @@ function createExplore({ db, geo, HttpError, bad, clean }) {
 
     // Road route of a trip (for the map preview). Same visibility as the trip itself.
     app.get("/api/trips/:id/route", optionalAuth, async (req, res) => {
-      const t = await db.one("SELECT id, origin, destination, origin_lat, origin_lng, dest_lat, dest_lng, route_distance_m, route_duration_s, route_geom FROM trips WHERE id = $1", [intParam(req.params.id)]);
+      const viewer = req.user ? req.user.id : null;
+      // Same visibility as the trip page: women-only routes exist only for their owner and women members.
+      const t = await db.one(`SELECT id, origin, destination, origin_lat, origin_lng, dest_lat, dest_lng, route_distance_m, route_duration_s, route_geom FROM trips t
+        WHERE t.id = $2 AND (t.women_only = 0 OR t.owner_id = $1 OR EXISTS (SELECT 1 FROM users wg WHERE wg.id = $1 AND wg.gender = 'female'))`, [viewer, intParam(req.params.id)]);
       if (!t) throw new HttpError(404, "Trip not found");
       let coords = null; try { coords = t.route_geom ? JSON.parse(t.route_geom) : null; } catch { coords = null; }
       const o = t.origin_lat != null ? { lat: t.origin_lat, lng: t.origin_lng } : null, d = t.dest_lat != null ? { lat: t.dest_lat, lng: t.dest_lng } : null;
@@ -102,7 +105,7 @@ function createExplore({ db, geo, HttpError, bad, clean }) {
         date: typeof b.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : null,
         time: typeof b.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(b.time) ? b.time : null,
         flex: Number(b.flex) || 60, vehicle_type: typeof b.vehicle_type === "string" ? b.vehicle_type : null,
-        min_seats: Number.isInteger(b.min_seats) ? b.min_seats : null,
+        min_seats: Number.isInteger(b.min_seats) ? b.min_seats : null, women_only: b.women_only === true,
       };
       if (!query.from && !query.to) throw bad("Tell us where you're going (and ideally where from)");
       const out = await match(req.user.id, query, candidates);

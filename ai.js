@@ -46,19 +46,60 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
     };
     to = pick(to);
     const date = /^\d{4}-\d{2}-\d{2}$/.test(a.date || "") ? a.date : null;
-    const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(a.time || "") ? a.time : null;
-    const flex = Math.max(15, Math.min(240, Number(a.flex_minutes) || 90));
-    const vehicle_type = typeof a.vehicle_type === "string" ? a.vehicle_type : null;
+    const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || "") ? v : null);
+    let time = hhmm(a.time), flex = Math.max(15, Math.min(240, Number(a.flex_minutes) || 90));
+    // A departure window ("between 8 and 8:30") → its midpoint, with enough flex to cover it plus 15 min either side.
+    const earliest = hhmm(a.earliest), latest = hhmm(a.latest);
+    let windowText = "";
+    if (earliest && latest && toMin(latest) >= toMin(earliest)) {
+      const mid = Math.round((toMin(earliest) + toMin(latest)) / 2);
+      time = `${String(Math.floor(mid / 60)).padStart(2, "0")}:${String(mid % 60).padStart(2, "0")}`;
+      flex = Math.max(20, Math.round((toMin(latest) - toMin(earliest)) / 2) + 15);
+      windowText = `${fmtClock(earliest)}–${fmtClock(latest)}`;
+    }
+    const VT = ["car", "bike", "scooty", "cab", "auto", "public"];
+    const vehicle_type = VT.includes(a.vehicle_type) ? a.vehicle_type : null;
+    const prefer = !vehicle_type && VT.includes(a.prefer_vehicle_type) ? a.prefer_vehicle_type : null;
     const min_seats = Number.isInteger(a.min_seats) ? a.min_seats : null;
+    const women_only = a.women_only === true;
     let results;
-    if (to || from) results = (await explore.match(me, { from, to, date, time, flex, vehicle_type, min_seats }, candidates, 8)).results;
+    if (to || from) results = (await explore.match(me, { from, to, date, time, flex, vehicle_type, min_seats, women_only }, candidates, 12)).results;
     else {
-      const trips = await candidates(me, { date, vehicle_type, min_seats });
-      results = trips.filter((t) => !time || Math.abs(toMin(t.depart_time) - toMin(time)) <= flex).slice(0, 8)
+      const trips = await candidates(me, { date, vehicle_type, min_seats, women_only });
+      results = trips.filter((t) => !time || Math.abs(toMin(t.depart_time) - toMin(time)) <= flex).slice(0, 12)
         .map((t) => ({ trip: explore.stripGeo(t), reasons: time ? [{ kind: "time", basis: "time", text: `Leaves at ${fmtClock(t.depart_time)}` }] : [] }));
     }
+    // A preference re-ranks (preferred vehicle first, otherwise best match order kept) instead of hiding the rest.
+    if (prefer) {
+      results = results.map((r, i) => ({ r, i, hit: r.trip.vehicle_type === prefer }))
+        .sort((x, y) => (y.hit - x.hit) || (x.i - y.i))
+        .map(({ r, hit }) => (hit ? { ...r, reasons: [{ kind: "vehicle", basis: "preference", text: `${VEHICLE_LABEL[prefer]}, as you prefer` }, ...r.reasons] } : r));
+    }
+    if (windowText) results = results.map((r) => { const m = toMin(r.trip.depart_time); const inside = m >= toMin(earliest) && m <= toMin(latest);
+      return inside ? { ...r, reasons: [...r.reasons.filter((x) => x.kind !== "time"), { kind: "time", basis: "window", text: `Leaves at ${fmtClock(r.trip.depart_time)} — inside your ${windowText} window` }] } : r; });
+    results = results.slice(0, 8);
     for (const r of results) ctx.cards.set(r.trip.id, { trip: r.trip, reasons: r.reasons });
-    return { searched: { to: to && to.label, from: from && from.label, date, time, flex_minutes: time ? flex : null }, count: results.length, journeys: results.map((r) => tripBrief(r.trip, r.reasons)) };
+    ctx.lastResults = results;
+    return { searched: { to: to && to.label, from: from && from.label, date, time, flex_minutes: time ? flex : null, window: windowText || null, prefer_vehicle: prefer, women_only },
+      count: results.length, journeys: results.map((r) => tripBrief(r.trip, r.reasons)) };
+  }
+  const VEHICLE_LABEL = { car: "Car", bike: "Motorcycle", scooty: "Scooty", cab: "Cab", auto: "Auto", public: "Public transport" };
+
+  // The agent may only PROPOSE a join request. Nothing is sent until the member taps "Send request" in the app.
+  async function proposeJoin(me, a, ctx) {
+    const id = Number(a.trip_id);
+    if (!Number.isInteger(id)) return { error: "trip_id must be a number" };
+    const t = await getTrip(id, me);
+    if (!t) return { error: "No such trip" };
+    if (t.is_owner) return { error: "That's the member's own journey" };
+    if (t.status !== "open") return { error: "That journey isn't taking requests" };
+    if (t.seats_left === 0) return { error: "That journey has no seats left" };
+    if (t.my_interest === "pending" || t.my_interest === "accepted") return { error: `The member already has a ${t.my_interest} request on that journey` };
+    const owner = (t.owner.name || "").split(" ")[0];
+    const note = clean(a.note, 200) || `Hi ${owner}! I'm heading the same way (${t.origin} → ${t.destination}) — could I join you? Happy to meet at a public spot on your route and share the cost.`;
+    if (!ctx.actions.some((x) => x.trip_id === id)) ctx.actions.push({ type: "join_request", trip_id: id, route: `${t.origin} → ${t.destination}`, date: t.depart_date, time: fmtClock(t.depart_time), vehicle: t.vehicle_type, owner_name: t.owner.name, note });
+    ctx.cards.set(t.id, ctx.cards.get(t.id) || { trip: explore.stripGeo(t), reasons: [] });
+    return { proposed: true, sent: false, trip_id: id, note, instructions: "Shown to the member as a draft with a Send button. It is NOT sent until they tap it." };
   }
   const toMin = (t) => { const [h, m] = String(t).split(":").map(Number); return h * 60 + m; };
 
@@ -101,7 +142,14 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
 
   const TOOLS = [
     { name: "find_journeys", description: "Search real upcoming SaathRide journeys the member could join. Use for any request to find/show/match trips. Resolve relative dates yourself (YYYY-MM-DD). 'morning' ≈ 08:00 with flex 120, 'evening' ≈ 18:00 with flex 120. Place names like 'my office' or a saved route name are resolved from the member's saved places.",
-      input_schema: { type: "object", properties: { to: { type: "string", description: "Destination place/area" }, from: { type: "string", description: "Pickup area" }, date: { type: "string", description: "YYYY-MM-DD" }, time: { type: "string", description: "HH:MM 24h preferred departure" }, flex_minutes: { type: "integer" }, vehicle_type: { type: "string", enum: ["car", "bike", "scooty", "cab", "auto", "public"] }, min_seats: { type: "integer" } } } },
+      input_schema: { type: "object", properties: { to: { type: "string", description: "Destination place/area" }, from: { type: "string", description: "Pickup area" }, date: { type: "string", description: "YYYY-MM-DD" },
+        time: { type: "string", description: "HH:MM 24h preferred departure" }, flex_minutes: { type: "integer" },
+        earliest: { type: "string", description: "HH:MM — start of a departure window the member gave (e.g. 'between 8 and 8:30' → 08:00)" }, latest: { type: "string", description: "HH:MM — end of that window" },
+        vehicle_type: { type: "string", enum: ["car", "bike", "scooty", "cab", "auto", "public"], description: "Only when the member REQUIRES this vehicle" },
+        prefer_vehicle_type: { type: "string", enum: ["car", "bike", "scooty", "cab", "auto", "public"], description: "When the member merely prefers it ('I'd prefer a motorcycle') — ranks it first without hiding others. 'motorcycle'/'motorbike' = bike." },
+        min_seats: { type: "integer" }, women_only: { type: "boolean", description: "Only women-only journeys (available to women members)" } } } },
+    { name: "propose_join_request", description: "Draft a private join request for one journey from your search results, for the member to review. It is NEVER sent by you: the app shows it with a 'Send request' button and only the member's tap sends it. Use when the member asks you to connect/ask/request, or after finding a clearly good match for someone who said what they intend to do. Draft a short, friendly note (no phone numbers or exact addresses).",
+      input_schema: { type: "object", properties: { trip_id: { type: "integer" }, note: { type: "string", description: "Draft note to the trip owner, under 200 characters" } }, required: ["trip_id"] } },
     { name: "get_trip", description: "Details of one SaathRide trip by id.", input_schema: { type: "object", properties: { trip_id: { type: "integer" } }, required: ["trip_id"] } },
     { name: "estimate_contribution", description: "Estimate a fair cost share using the trip's mapped road distance (or a mapped route between two places) and explicit assumptions. Always use this instead of guessing numbers.",
       input_schema: { type: "object", properties: { trip_id: { type: "integer" }, from: { type: "string" }, to: { type: "string" }, vehicle_type: { type: "string", enum: ["car", "bike", "scooty", "cab", "auto", "public"] }, people: { type: "integer", description: "People sharing, including the driver/rider" }, distance_km: { type: "number", description: "Only if the member stated the distance" } } } },
@@ -115,6 +163,7 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
       if (name === "estimate_contribution") return await estimateTool(me, input || {}, ctx);
       if (name === "my_places") { const p = await myPlaces(me); return { ...p, saved_routes: p.saved_routes.map((r) => ({ name: r.name, from: r.origin_label, to: r.dest_label, time: r.depart_time, days: r.days })) }; }
       if (name === "my_trips") return await myTripsTool(me);
+      if (name === "propose_join_request") return await proposeJoin(me, input || {}, ctx);
       return { error: "Unknown tool" };
     } catch (err) { console.error("ai tool failed:", name, err.message); return { error: "Tool failed" }; }
   }
@@ -131,6 +180,8 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
       "- For costs, always call estimate_contribution and state that it's an estimate with its key assumptions. Never present it as an official fare.",
       "- For captions, write 3 short, friendly options (under 200 characters each) that mention route, time and what kind of co-traveller is welcome. No exact home addresses, phone numbers or claims of verification.",
       "- Safety tips when relevant: meet at public landmarks, share plans with someone you trust, keep chats in the app. Emergency number in India: 112.",
+      "- You act on the member's stated intention: search, rank and explain. You may draft join requests with propose_join_request, but you can't send anything. Never say a request was sent — say you've prepared it and they can tap “Send request” to send it (or edit the note first).",
+      "- Treat 'I'd prefer X' as prefer_vehicle_type and 'only X' / 'must be X' as vehicle_type. Turn departure windows ('between 8 and 8:30', 'after 7', 'before 9') into earliest/latest.",
       "- Keep replies short (under 120 words), warm and practical. Plain text; short bullet lists are fine. No markdown headings.",
     ].filter(Boolean).join("\n");
   }
@@ -146,7 +197,7 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
   }
 
   async function aiAnswer(me, message, history, contextTrip) {
-    const ctx = { cards: new Map(), estimate: null };
+    const ctx = { cards: new Map(), estimate: null, actions: [] };
     const places = await myPlaces(me);
     const messages = [...history.map((h) => ({ role: h.role, content: h.text })), { role: "user", content: message }];
     let text = "";
@@ -164,7 +215,7 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
       for (const u of uses) results.push({ type: "tool_result", tool_use_id: u.id, content: JSON.stringify(await runTool(me, u.name, u.input, ctx)).slice(0, 12000) });
       messages.push({ role: "user", content: results });
     }
-    return { mode: "ai", reply: text || "Sorry, I couldn't put an answer together. Try rephrasing?", cards: [...ctx.cards.values()].slice(0, 6), estimate: ctx.estimate };
+    return { mode: "ai", reply: text || "Sorry, I couldn't put an answer together. Try rephrasing?", cards: [...ctx.cards.values()].slice(0, 6), estimate: ctx.estimate, actions: ctx.actions.slice(0, 3) };
   }
 
   // ---------- basic mode (no AI service) ----------
@@ -186,8 +237,26 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
     if (to) q.to = to[1].replace(/^(the)\s+/, "").trim();
     const from = t.match(new RegExp(`\\bfrom\\s+(.+?)${stop.replace("|from", "|to|towards|heading|going")}`));
     if (from) q.from = from[1].trim();
-    for (const [w, v] of VEHICLE_WORDS) if (new RegExp(`\\b${w}s?\\b`).test(t)) { q.vehicle_type = v; break; }
-    const ppl = t.match(/\b(\d)\s*(?:people|persons|ppl|pax|of us|riders|friends|travellers|travelers)\b/) || t.match(/\b(?:between|among)\s+(\d)\b/);
+    // Departure windows: "between 8 and 8:30", "8-8:30 am", "after 7", "before 9:30"
+    const clock = (h, m, ap, fallbackAp) => { let H = Number(h) % 12; const a = ap || fallbackAp; if (a === "pm") H += 12; if (!a) H = Number(h) < 7 ? Number(h) + 12 : Number(h); return `${String(Math.min(H, 23)).padStart(2, "0")}:${m || "00"}`; };
+    const win = t.match(/\b(?:between|from)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*(?:and|to|-|–)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/) || t.match(/\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*[-–]\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b/);
+    if (win && !/\b(?:people|persons|of us|riders|friends)\b/.test(t.slice(win.index, win.index + win[0].length + 12))) {
+      const ap = win[6] || win[3] || (/\bmorning\b/.test(t) ? "am" : /\b(evening|night)\b/.test(t) ? "pm" : "");
+      q.earliest = clock(win[1], win[2], win[3], ap); q.latest = clock(win[4], win[5], win[6], ap);
+      delete q.time; delete q.flex_minutes;
+    } else {
+      const after = t.match(/\b(?:after|not before)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/), before = t.match(/\b(?:before|by|no later than)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/);
+      if (after || before) {
+        const ap = /\bmorning\b/.test(t) ? "am" : /\b(evening|night)\b/.test(t) ? "pm" : "";
+        q.earliest = after ? clock(after[1], after[2], after[3], ap) : before ? `${String(Math.max(0, Number(clock(before[1], before[2], before[3], ap).slice(0, 2)) - 2)).padStart(2, "0")}:00` : undefined;
+        q.latest = before ? clock(before[1], before[2], before[3], ap) : `${String(Math.min(23, Number(q.earliest.slice(0, 2)) + 2)).padStart(2, "0")}:${q.earliest.slice(3)}`;
+        delete q.time; delete q.flex_minutes;
+      }
+    }
+    const prefers = /\b(prefer|preferably|ideally|would like|i'd like|rather)\b/.test(t);
+    for (const [w, v] of VEHICLE_WORDS) if (new RegExp(`\\b${w}s?\\b`).test(t)) { if (prefers) q.prefer_vehicle_type = v; else q.vehicle_type = v; break; }
+    if (/\bwomen[- ]only\b|\bonly women\b|\bladies\b|\bfemale (?:driver|rider|co-?traveller)s?\b/.test(t)) q.women_only = true;
+    const ppl = t.match(/\b(\d)\s*(?:people|persons|ppl|pax|of us|riders|friends|travellers|travelers)\b/) || (!q.earliest && t.match(/\b(?:between|among)\s+(\d)\b(?!\s*(?:[:.]\d|am|pm|and\s+\d))/));
     if (ppl) q.people = Number(ppl[1]);
     return q;
   }
@@ -202,7 +271,7 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
     ];
   }
   async function basicAnswer(me, message, contextTrip, notice) {
-    const ctx = { cards: new Map(), estimate: null };
+    const ctx = { cards: new Map(), estimate: null, actions: [] };
     const t = message.toLowerCase();
     const q = parseQuery(message);
     let reply;
@@ -225,14 +294,19 @@ function createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, tod
         if (r) { q.to = r.dest_label; q.from = q.from || r.origin_label || undefined; q.time = q.time || r.depart_time || undefined; if (q.time && !q.flex_minutes) q.flex_minutes = 60; }
       }
       const res = await findJourneys(me, q, ctx);
-      const what = [res.searched.to && `to ${res.searched.to}`, res.searched.from && `from ${res.searched.from}`, res.searched.date && `on ${res.searched.date}`, res.searched.time && `around ${fmtClock(res.searched.time)}`].filter(Boolean).join(" ");
+      const s = res.searched;
+      const what = [s.to && `to ${s.to}`, s.from && `from ${s.from}`, s.date && `on ${s.date}`, s.window ? `leaving ${s.window}` : s.time && `around ${fmtClock(s.time)}`, s.prefer_vehicle && `(${VEHICLE_LABEL[s.prefer_vehicle].toLowerCase()} preferred)`, s.women_only && "(women-only)"].filter(Boolean).join(" ");
+      // An intention ("find someone…", "ask", "connect") → prepare a request for the best match. The member sends it.
+      const wantsConnect = /\b(find (?:me )?someone|someone going|connect|ask (?:them|him|her|to join)|request|book|join)\b/.test(t);
+      let drafted = null;
+      if (wantsConnect && ctx.lastResults) for (const r of ctx.lastResults) { const p = await proposeJoin(me, { trip_id: r.trip.id }, ctx); if (p.proposed) { drafted = r.trip; break; } }
       reply = res.count
-        ? `I found ${res.count} journey${res.count === 1 ? "" : "s"}${what ? ` ${what}` : ""}. Tap one to see the post — the reasons under each card explain the match.`
+        ? `I found ${res.count} journey${res.count === 1 ? "" : "s"}${what ? ` ${what}` : ""}, best match first — the reasons under each card explain why.${drafted ? ` I've drafted a request to ${drafted.owner.name.split(" ")[0]} for ${drafted.origin} → ${drafted.destination} at ${fmtClock(drafted.depart_time)}. Nothing is sent until you tap “Send request” — you can edit the note first.` : ""}`
         : `No open journeys${what ? ` ${what}` : ""} right now. Try a wider time window or another day, save this route on Explore to get an alert when one is posted, or share your own journey so others can find you.`;
     } else {
-      reply = "I can find journeys (“people going to IIT Kharagpur tomorrow morning”), match your saved route, write a caption for your trip, or estimate a fair cost share for a route.";
+      reply = "Tell me what you're planning — e.g. “Find someone going to IIT Kharagpur tomorrow morning. I'd prefer a motorcycle and can leave between 8 and 8:30.” I'll search real posts, rank them, explain each match and prepare a join request you can send with one tap. I can also write a caption or estimate a fair cost share.";
     }
-    return { mode: "basic", notice, reply, cards: [...ctx.cards.values()].slice(0, 6), estimate: ctx.estimate };
+    return { mode: "basic", notice, reply, cards: [...ctx.cards.values()].slice(0, 6), estimate: ctx.estimate, actions: ctx.actions.slice(0, 3) };
   }
 
   function register(app, { auth, writeLimit, intParam, L }) {

@@ -83,6 +83,33 @@ Without a key Saath AI runs in **basic mode** (rule-based: trip search, matching
 
 How it stays honest: the browser only talks to `/api/ai/chat`. The model can only read SaathRide data through server-side tools that apply the signed-in member's normal permissions (blocked members, women-only trips and report-hidden posts are excluded exactly as in the feed). Journey cards under each answer come from those tool results, never from the model's text, so it can't invent trips, people, seats or prices. Cost shares come from a calculator using the trip's mapped road distance and stated assumptions (mileage, fuel price, split), always labelled as estimates. Limits: 20 questions per 10 minutes and 150 per day per member, 600 characters per question, 10 turns of history; chats aren't stored. If the AI service fails or times out, members get a basic-mode answer instead of an error.
 
+## 1f. Email notifications — free with Brevo (recommended, ~5 minutes)
+
+Email copies of important notifications (join requests, replies, accepted/declined, trip changes, safety check-in prompts, safety report updates) plus everything Saath Circle needs: invitations to trusted contacts and their safety alerts. Without a key, email is simply off and everything stays in-app.
+
+1. <https://www.brevo.com> → sign up (free plan: about 300 emails/day, no card).
+2. **Senders, domains & dedicated IPs → Senders → Add a sender** — use your own address (e.g. your Gmail) and click the confirmation link Brevo emails you. No domain needed.
+3. **SMTP & API → API keys → Generate a new API key.**
+4. In Vercel → Project → Settings → Environment Variables add:
+   ```
+   BREVO_API_KEY=xkeysib-…            (the key from step 3)
+   EMAIL_FROM=SaathRide <you@gmail.com>   (the sender you verified in step 2)
+   APP_URL=https://your-site.vercel.app   (used for links in emails)
+   ```
+   then redeploy. `/api/config` should show `"email": true`.
+5. Sign up (or open Edit profile → Notifications → *Send confirmation email*) and click the link. Emails only ever go to confirmed addresses; message emails never include the message text, and each member can switch email off.
+
+Prefer Resend? Set `RESEND_API_KEY` instead (free ~3,000/month, but until you verify a domain it only delivers to your own Resend account address).
+
+## 1g. Safety check-in watcher — free scheduler (recommended, ~3 minutes)
+
+Missed check-ins and overdue arrivals are handled by a watcher. It already runs whenever anyone uses the app (at most once a minute per server instance), but at quiet times nobody may be online — so give it a heartbeat:
+
+1. In Vercel add `CRON_SECRET=` (any long random string) and redeploy.
+2. At <https://cron-job.org> (free) create a job: URL `https://your-site.vercel.app/api/cron/safety-sweep`, method POST, every **1 minute**, with the header `Authorization: Bearer <your CRON_SECRET>`.
+
+(Vercel's own cron runs at most once a day on the free Hobby plan, which is too slow for safety check-ins.)
+
 ## 2. Run locally
 
 ```bash
@@ -168,6 +195,15 @@ Fixes: Neon PostgreSQL (`db.js`, `schema.sql`), `api/index.js` + `vercel.json` r
 - **Trip updates** – on the day of travel the owner can send "Leaving now", "Running ~10 min late", "At the pickup point", "Arrived" or a short note to confirmed travellers only; they expire after 12 hours. No live location.
 - **Notification settings** – switch off categories (messages, requests, trip changes, trip updates, route alerts, missed calls); trip cancellations are always delivered.
 - **Report review** – accounts in `ADMIN_EMAILS` get `/#/admin` to resolve or dismiss post and member reports (dismissing restores a hidden post). Everyone else gets "not found".
+- **Email notifications** – optional (Brevo or Resend, free tiers): confirmation link at signup, then email copies of key notifications to confirmed addresses only, throttled, never quoting messages, with a master switch in Settings.
+- **Women's space** (`#/women`, members whose gender is set to female) – women-only journeys, women-only route matching, safety tools. Women-only journeys are invisible to men and logged-out visitors everywhere: feed, search, trip pages, profiles, matching, routes and link previews. Gender is self-declared and the app says so; misrepresentation can be reported as impersonation.
+- **Saath Circle** – up to 5 trusted contacts by email. They must accept an invitation (their own page, no account needed) before getting anything, and can opt out any time from any email.
+- **Safety mode** – start for a journey (or any trip): contacts get a private live link showing check-ins, ETA and (optionally) live location, kept only as the latest point and wiped at the end; links expire 2 h after the journey. Check-ins at departure, halfway (trips ≥ 20 min) and arrival; extend the ETA. A missed check-in first asks the traveller (in-app + email); only after 10 minutes without an answer is their chosen plan followed — tell the circle (with wording that it doesn't necessarily mean an emergency) or only remind them. Overdue arrivals are handled the same way. Forgotten sessions end themselves.
+- **SOS** – always one tap away (Safety page, trip page, the safety bar): one-tap call to **112**, and an immediate email to accepted contacts with the live link — even with no session running.
+- **QR boarding confirmation** – trip owners show a boarding QR + 6-character code; a confirmed passenger scans it with their phone camera (or types the code) to confirm they're in the right vehicle. A wrong code says "don't board". Boarding is logged for the owner and the passenger's circle.
+- **Safety cases** – *Report a safety concern* (profile, chat menu, Safety page): category (threats, sexual misconduct, stalking, harassment, dangerous driving, impersonation, scams, other) sets a severity and a first-response target (1 h / 12 h / 2 days / 5 days); optional evidence, the conversation can be shared with the team, and block at the same time. The team (`ADMIN_EMAILS`) gets an email for critical/high cases and a queue at `/#/admin/cases` sorted by severity with overdue flags, case detail (prior cases, shared conversation), status workflow (received → reviewed → investigating → action taken → closed, outcome required), internal notes, messages to the reporter, and **account suspension** (blocks sign-in, cancels open journeys and tells the passengers). Reporters follow their cases under Safety → My reports. The response process is written into the queue.
+- **Journey Memories** – after a journey, anyone who travelled on it can create one shared memory: route map, photos (when uploads are on) and highlights from each traveller. Private to the travellers by default; the creator can make it public, and each traveller separately chooses whether it appears on their profile. Profiles show a journey record — memories, journeys travelled, and the (self-declared) communities travelled with.
+- **Saath AI agent** – describe what you intend ("Find someone going to IIT Kharagpur tomorrow morning. I'd prefer a motorcycle and can leave between 8 and 8:30"): it understands time windows and preferences vs. requirements, searches real posts, ranks and explains them, and drafts a join request. Nothing is sent until you tap *Send request* (you can edit the note); in AI mode the model has a *propose* tool only — it can't send.
 
 ## Tests
 
@@ -176,21 +212,23 @@ npm install
 npm test
 ```
 
-Five suites (47 tests): `api.test.js` (auth, trips, interest workflow, legacy per-trip messages, ratings, rate limits), `social.test.js` (Cloudinary signing incl. the size-capping transformation, photo posts, edit/delete, likes, comments, usernames, privacy, avatars, share links), `messaging.test.js` (conversations, authorization, persistence, inbox, notifications, blocking, reports, call signalling and LiveKit tokens), `discovery.test.js` (matching rules and their evidence labels, cost estimates, trip coordinates and routes, place search and caching, the matching API with exclusions, Saath AI in basic mode and with the Claude API — tool use on real data, cards only from tool results, failure fallback, usage limits — saved routes and alerts, recommendations, communities, people search, trip updates, notification preferences, report review) and `frontend-smoke.test.js` (every screen renders against the real API and escapes hostile text — a stub DOM, **not** a real browser).
+Six suites (57 tests): `api.test.js` (auth, trips, interest workflow, legacy per-trip messages, ratings, rate limits), `social.test.js` (Cloudinary signing incl. the size-capping transformation, photo posts, edit/delete, likes, comments, usernames, privacy, avatars, share links), `messaging.test.js` (conversations, authorization, persistence, inbox, notifications, blocking, reports, call signalling and LiveKit tokens), `discovery.test.js` (matching rules and their evidence labels, cost estimates, trip coordinates and routes, place search and caching, the matching API with exclusions, Saath AI in basic mode and with the Claude API — tool use on real data, cards only from tool results, failure fallback, usage limits — saved routes and alerts, recommendations, communities, people search, trip updates, notification preferences, report review) `safety.test.js` (email confirmation and copies, Saath Circle consent, safety sessions with missed check-in escalation and share links, SOS, QR boarding, safety cases with suspension, women-only matching, Journey Memories, the AI agent's permission-gated requests) and `frontend-smoke.test.js` (every screen renders against the real API and escapes hostile text — a stub DOM, **not** a real browser).
 
-`npm test` runs the SQL on Node's built-in SQLite (`test/sqlite-adapter.js`) so it works anywhere. To check against real Postgres, point the suites at a scratch database instead (they create their own tables); they have also been run that way against PostgreSQL 16. External services are never contacted by the tests: Cloudinary, the map services (Mapbox, Photon, OSRM), the Claude API and LiveKit are replaced by local fakes, so after adding real keys, click through photos, the map, Saath AI and a call once on the deployed site.
+`npm test` runs the SQL on Node's built-in SQLite (`test/sqlite-adapter.js`) so it works anywhere. To run them against real Postgres, set `TEST_PG_URL=postgres://…` to an **empty scratch** database (one suite at a time); all suites pass on PostgreSQL 16. External services are never contacted by the tests: Cloudinary, the map services (Mapbox, Photon, OSRM), email (Brevo), the Claude API and LiveKit are replaced by local fakes, so after adding real keys, click through photos, the map, Saath AI and a call once on the deployed site.
 
 ## Known limits / next up
 
 - Rate limiting is in-memory per serverless instance (best-effort). Use a shared store (e.g. Upstash Redis) for strict limits.
-- No email verification, password reset or real identity verification yet.
+- No password reset or real identity verification yet (email addresses are confirmed; gender, college and names are self-declared).
 - Uploads that are abandoned before publishing leave orphan files in Cloudinary (clear them in the Media Library).
 - Comments can't be reported individually yet; posts and members can.
 - Route matching compares against each trip's single stored road route (driving profile from OSRM or Mapbox; bus/metro trips have no transit routing). Distances/times are estimates. Trips posted before maps were configured have no coordinates until their route is edited.
 - Recurring commutes are shown until their listed date passes; there's no automatic "next occurrence" yet — owners repost or edit the date.
 - Saath AI chats aren't saved between sessions. Basic mode understands simpler phrasing only.
 - Messages, badges and incoming calls use polling (Vercel serverless functions can't hold WebSockets). It's reliable but not instant and costs a request every few seconds per open tab. For instant delivery, add a managed realtime service (e.g. Pusher, Ably or LiveKit data channels) and push a "something changed" ping that triggers the same fetches.
-- No push notifications to phones or email when the app is closed; notifications are in-app.
+- No push notifications to phones; with email set up, important notifications also arrive by email.
+- Live location in safety mode updates while the app is open in the traveller's browser (web apps can't track in the background). Check-ins, SOS and the circle's link work regardless; keep the tab open or check in manually.
+- SaathRide is not an emergency service. SOS emails the circle and offers a one-tap 112 call; it doesn't contact authorities.
 - Calls are 1:1 audio only, and need someone to keep the app open to hear it ring.
-- Report review is a simple list for `ADMIN_EMAILS` accounts — no suspensions or bans yet (block + remove content manually in Neon if needed).
+- The safety team is whoever is in `ADMIN_EMAILS`; there are no separate moderator roles or evidence uploads (links and notes only).
 - SQLite data from the old version isn't migrated (the old DB file was local demo data only).

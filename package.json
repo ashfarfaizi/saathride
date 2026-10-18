@@ -11,7 +11,7 @@
     "dev": "node --env-file-if-exists=.env server.js",
     "migrate": "node --env-file-if-exists=.env scripts/migrate.js",
     "seed": "node --env-file-if-exists=.env seed.js",
-    "test": "node --test test/api.test.js test/social.test.js test/messaging.test.js test/discovery.test.js test/frontend-smoke.test.js"
+    "test": "node --test test/api.test.js test/social.test.js test/messaging.test.js test/discovery.test.js test/safety.test.js test/frontend-smoke.test.js"
   },
   "license": "ISC",
   "dependencies": {
@@ -20,6 +20,7 @@
     "jsonwebtoken": "^9.0.3",
     "livekit-client": "^2.9.0",
     "maplibre-gl": "^4.7.1",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "qrcode-generator": "^1.4.4"
   }
 }

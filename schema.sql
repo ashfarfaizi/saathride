@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS users (
   show_travel_areas INTEGER NOT NULL DEFAULT 1,
   show_interests INTEGER NOT NULL DEFAULT 1,
   notif_prefs   TEXT NOT NULL DEFAULT '',               -- JSON of switched-off notification categories
+  email_verified_at TIMESTAMPTZ,                        -- set when the member clicks the confirmation link
+  last_active_at TIMESTAMPTZ,                           -- coarse (≤1/min) — skip message emails while someone is in the app
+  suspended_at  TIMESTAMPTZ,                            -- set by the safety team; blocks sign-in and all actions
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -223,6 +226,15 @@ CREATE TABLE IF NOT EXISTS trip_comments (
 CREATE INDEX IF NOT EXISTS idx_trip_comments_trip ON trip_comments (trip_id, id);
 
 -- Cache of map-service answers (place search, road routes) to stay inside free quotas.
+-- One row per email sent, for throttling (e.g. one message email per conversation per 30 min).
+CREATE TABLE IF NOT EXISTS email_log (
+  id         SERIAL PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
+  sent_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_email_log ON email_log (user_id, key, sent_at);
+
 CREATE TABLE IF NOT EXISTS geo_cache (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,
@@ -258,3 +270,141 @@ CREATE TABLE IF NOT EXISTS trip_updates (
   expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trip_updates_trip ON trip_updates (trip_id, id);
+
+-- ================= Safety: Saath Circle, safety sessions, boarding, cases =================
+-- Trusted contacts. They must accept (link in an email) before they receive anything, and can opt out any time.
+CREATE TABLE IF NOT EXISTS trusted_contacts (
+  id          SERIAL PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  email       TEXT NOT NULL,
+  relation    TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','declined')),
+  token       TEXT NOT NULL UNIQUE,                 -- the contact's accept / opt-out link
+  invited_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  responded_at TIMESTAMPTZ,
+  UNIQUE (user_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_trusted_contacts_user ON trusted_contacts (user_id);
+
+-- One optional safety session per journey. Live location is kept only as the latest point and wiped when it ends.
+CREATE TABLE IF NOT EXISTS safety_sessions (
+  id               SERIAL PRIMARY KEY,
+  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trip_id          INTEGER REFERENCES trips(id) ON DELETE SET NULL,
+  label            TEXT NOT NULL DEFAULT '',
+  share_token      TEXT NOT NULL UNIQUE,            -- private link for the chosen contacts
+  status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','arrived','ended')),
+  escalation       TEXT NOT NULL DEFAULT 'contacts' CHECK (escalation IN ('contacts','self')),
+  share_location   INTEGER NOT NULL DEFAULT 1,
+  started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expected_arrival TIMESTAMPTZ NOT NULL,
+  midway_at        TIMESTAMPTZ,                     -- when the midway check-in falls due (NULL once done)
+  departed_at      TIMESTAMPTZ,
+  midway_done_at   TIMESTAMPTZ,
+  boarded_at       TIMESTAMPTZ,
+  last_checkin_at  TIMESTAMPTZ,
+  due_kind         TEXT NOT NULL DEFAULT '',        -- what we're waiting for: departure | midway | arrival
+  due_at           TIMESTAMPTZ,
+  missed_stage     INTEGER NOT NULL DEFAULT 0,      -- 0 fine · 1 asked the traveller · 2 told the circle
+  missed_at        TIMESTAMPTZ,
+  sos_at           TIMESTAMPTZ,
+  last_lat         DOUBLE PRECISION,
+  last_lng         DOUBLE PRECISION,
+  last_loc_at      TIMESTAMPTZ,
+  ended_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_safety_sessions_user ON safety_sessions (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_safety_sessions_due ON safety_sessions (status, due_at);
+CREATE TABLE IF NOT EXISTS safety_session_contacts (
+  session_id  INTEGER NOT NULL REFERENCES safety_sessions(id) ON DELETE CASCADE,
+  contact_id  INTEGER NOT NULL REFERENCES trusted_contacts(id) ON DELETE CASCADE,
+  PRIMARY KEY (session_id, contact_id)
+);
+CREATE TABLE IF NOT EXISTS safety_events (
+  id          SERIAL PRIMARY KEY,
+  session_id  INTEGER NOT NULL REFERENCES safety_sessions(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  note        TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_safety_events_session ON safety_events (session_id, id);
+
+-- QR boarding confirmation: the driver shows a code; a confirmed passenger scans it to confirm the right vehicle.
+CREATE TABLE IF NOT EXISTS trip_boarding_codes (
+  trip_id     INTEGER PRIMARY KEY REFERENCES trips(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS trip_boardings (
+  trip_id     INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  boarded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (trip_id, user_id)
+);
+
+-- Safety response: every safety report becomes a tracked case with severity, evidence and a history.
+CREATE TABLE IF NOT EXISTS safety_cases (
+  id              SERIAL PRIMARY KEY,
+  reporter_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  subject_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  trip_id         INTEGER REFERENCES trips(id) ON DELETE SET NULL,
+  conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+  category        TEXT NOT NULL,
+  severity        TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  status          TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','triaged','investigating','action_taken','closed')),
+  description     TEXT NOT NULL DEFAULT '',
+  evidence        TEXT NOT NULL DEFAULT '[]',       -- JSON: [{ kind: 'note'|'link'|'message', value }]
+  happened_on     TEXT NOT NULL DEFAULT '',
+  assignee_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  outcome         TEXT NOT NULL DEFAULT '',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_safety_cases_status ON safety_cases (status, severity);
+CREATE INDEX IF NOT EXISTS idx_safety_cases_reporter ON safety_cases (reporter_id);
+CREATE TABLE IF NOT EXISTS safety_case_events (
+  id          SERIAL PRIMARY KEY,
+  case_id     INTEGER NOT NULL REFERENCES safety_cases(id) ON DELETE CASCADE,
+  actor_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  kind        TEXT NOT NULL,                        -- created | status | severity | assign | note | evidence | message_to_reporter
+  body        TEXT NOT NULL DEFAULT '',
+  internal    INTEGER NOT NULL DEFAULT 1,           -- 0 = visible to the reporter
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_safety_case_events_case ON safety_case_events (case_id, id);
+
+-- ================= Journey Memories =================
+CREATE TABLE IF NOT EXISTS journey_memories (
+  id          SERIAL PRIMARY KEY,
+  trip_id     INTEGER NOT NULL UNIQUE REFERENCES trips(id) ON DELETE CASCADE,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  title       TEXT NOT NULL,
+  visibility  TEXT NOT NULL DEFAULT 'participants' CHECK (visibility IN ('participants','public')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Each participant decides separately whether a public memory appears on their own profile.
+CREATE TABLE IF NOT EXISTS memory_members (
+  memory_id       INTEGER NOT NULL REFERENCES journey_memories(id) ON DELETE CASCADE,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  show_on_profile INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (memory_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS memory_highlights (
+  id          SERIAL PRIMARY KEY,
+  memory_id   INTEGER NOT NULL REFERENCES journey_memories(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memory_highlights ON memory_highlights (memory_id, id);
+CREATE TABLE IF NOT EXISTS memory_photos (
+  id          SERIAL PRIMARY KEY,
+  memory_id   INTEGER NOT NULL REFERENCES journey_memories(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  url         TEXT NOT NULL,
+  public_id   TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memory_photos ON memory_photos (memory_id, id);

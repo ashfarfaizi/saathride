@@ -8,8 +8,11 @@ const db = require("./db");
 const { createMessaging, livekitConnectSources } = require("./messaging");
 const { createGeo } = require("./geo");
 const { createExplore, findMapSdk, mapStyleUrl, mapConnectSources } = require("./explore");
+const { createMailer } = require("./mailer");
 const { createAi } = require("./ai");
 const { createSocial } = require("./social");
+const { createSafety } = require("./safety");
+const { createMemories } = require("./memories");
 
 const IS_TEST = process.env.NODE_ENV === "test";
 const IS_PROD = process.env.NODE_ENV === "production" || !!process.env.VERCEL;
@@ -145,10 +148,22 @@ function readUser(req) {
   try { const p = jwt.verify(token, JWT_SECRET); return Number.isInteger(p.id) ? { id: p.id } : null; } catch { return null; }
 }
 const optionalAuth = (req, _res, next) => { req.user = readUser(req); next(); };
+// Suspended accounts (safety team) can't act. Checked per request with a short cache so it stays cheap.
+const suspendedCache = new Map();
+async function isSuspended(id) {
+  const hit = suspendedCache.get(id), now = Date.now();
+  if (hit && hit.exp > now) return hit.v;
+  const r = await db.one("SELECT suspended_at FROM users WHERE id = $1", [id]);
+  const v = !r || !!r.suspended_at;   // a deleted account counts as gone too
+  if (suspendedCache.size > 5000) suspendedCache.clear();
+  suspendedCache.set(id, { v, exp: now + 30_000 });
+  return v;
+}
+const forgetSuspension = (id) => suspendedCache.delete(id);
 const auth = (req, _res, next) => {
   req.user = readUser(req);
   if (!req.user) return next(new HttpError(401, "Please log in to continue"));
-  next();
+  isSuspended(req.user.id).then((s) => next(s ? new HttpError(403, "This account is suspended. Contact SaathRide support if you think this is a mistake.") : undefined), next);
 };
 
 // ---------- rate limiting (in-memory, per server instance) ----------
@@ -188,6 +203,7 @@ function publicProfile(u, own = false) {
 const selfProfile = (u) => ({
   ...publicProfile(u, true), email: u.email, phone: u.phone || "", gender: u.gender, has_vehicle: !!u.has_vehicle, vehicle_type: u.vehicle_type,
   show_college: !!u.show_college, show_travel_areas: !!u.show_travel_areas, show_interests: !!u.show_interests,
+  email_verified: !!u.email_verified_at,
 });
 const getUser = (id) => db.one(`SELECT u.*, ${RATING_COLS} FROM users u WHERE u.id = $1`, [id]);
 
@@ -205,6 +221,9 @@ const TRIP_SELECT = `
     (SELECT i.status FROM interests i WHERE i.trip_id = t.id AND i.user_id = $1) AS my_interest,
     CASE WHEN EXISTS (SELECT 1 FROM saved_trips s WHERE s.trip_id = t.id AND s.user_id = $1) THEN 1 ELSE 0 END AS saved
   FROM trips t JOIN users u ON u.id = t.owner_id`;
+// Safety: a women-only trip exists only for its owner and for women members — everywhere trips are read
+// (feed, search, trip page, profiles, matching, links). $1 is always the viewer's id (NULL when logged out).
+const WOMEN_GATE = `(t.women_only = 0 OR t.owner_id = $1 OR EXISTS (SELECT 1 FROM users wg WHERE wg.id = $1 AND wg.gender = 'female'))`;
 
 function tripView(r, viewerId) {
   const seatsLeft = r.seats_total == null ? null : Math.max(0, r.seats_total - r.confirmed_count);
@@ -241,18 +260,19 @@ async function withImages(views, q = db) {
 }
 const tripViews = (rows, viewerId) => withImages(rows.map((r) => tripView(r, viewerId)));
 const getTrip = async (id, viewerId, q = db) => {
-  const r = await q.one(`${TRIP_SELECT} WHERE t.id = $2`, [viewerId ?? null, id]);
+  const r = await q.one(`${TRIP_SELECT} WHERE t.id = $2 AND ${WOMEN_GATE}`, [viewerId ?? null, id]);
   return r ? (await withImages([tripView(r, viewerId)], q))[0] : null;
 };
 
 // ---------- app factory ----------
-function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekitSdk, geoFetch, mapSdk, aiFetch } = {}) {
+function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekitSdk, geoFetch, mapSdk, aiFetch, mailFetch } = {}) {
   const L = { auth: 10, write: 40, api: 400, trip: 20, interest: 30, report: 10, message: 80, like: 400, comment: 60, upload: 60, conversation: 40, call: 30,
     geo: 60, match: 30, ai: 20, aiDay: 150, update: 30, route: 30, search: 60, ...limits };
   const geo = createGeo({ db, ...(geoFetch ? { fetchImpl: geoFetch } : {}) });
   const explore = createExplore({ db, geo, HttpError, bad, clean });
   const sdk = mapSdk !== undefined ? mapSdk : findMapSdk();
-  const chat = createMessaging({ db, HttpError, bad, clean, ...(livekitSdk !== undefined ? { sdkPath: livekitSdk } : {}) });
+  const mailer = createMailer(mailFetch ? { fetchImpl: mailFetch } : {});
+  const chat = createMessaging({ db, HttpError, bad, clean, mailer, ...(livekitSdk !== undefined ? { sdkPath: livekitSdk } : {}) });
   const { notify } = chat;
   const csp = () => ["default-src 'self'", "script-src 'self'", "style-src 'self' https://fonts.googleapis.com", "font-src https://fonts.gstatic.com",
     // Map entries are unconditional: Vercel serves index.html from its CDN with headers captured at
@@ -290,6 +310,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   // CSRF defence in depth (cookie is SameSite=Lax): writes must be same-origin JSON.
   app.use("/api", (req, _res, next) => {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    if (req.path.startsWith("/cron/")) return next();   // scheduler hooks: protected by CRON_SECRET, not cookies
     const origin = req.headers.origin;
     if (origin) { try { if (new URL(origin).host !== req.headers.host) return next(new HttpError(403, "Cross-origin request blocked")); } catch { return next(new HttpError(403, "Bad origin")); } }
     if (!/^application\/json/i.test(req.headers["content-type"] || "")) return next(new HttpError(415, "Content-Type must be application/json"));
@@ -310,25 +331,27 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   // public, non-secret capabilities the UI needs (is photo upload configured?)
   app.get("/api/config", (_req, res) => res.json({ uploads: uploadsEnabled(), max_images: MAX_IMAGES, caption_max: CAPTION_MAX, calls: chat.callsEnabled(), calls_status: chat.callsStatus(),
     geo: geo.enabled(), map: !!sdk, map_style: sdk ? mapStyleUrl() : "", map_status: sdk ? "ready" : "sdk_missing",
-    ai: ai.enabled(), ai_status: ai.status() }));
+    ai: ai.enabled(), ai_status: ai.status(), email: mailer.enabled(), email_status: mailer.status() }));
 
+  // Safety first: its watcher middleware must run before /api/sync (registered by chat).
+  const safety = createSafety({ db, HttpError, bad, clean, chat, mailer, getTrip, TZ, forgetSuspension });
+  safety.register(app, { auth, optionalAuth, writeLimit, intParam });
   chat.register(app, { auth, writeLimit, intParam, likeEscape, L });
+  const memories = createMemories({ db, HttpError, bad, clean, chat, checkImages, destroyImage, todayStr, TZ, WOMEN_GATE });
+  memories.register(app, { auth, optionalAuth, writeLimit, intParam });
 
   // Upcoming open journeys a member may join (same visibility rules as the feed), with map data for matching.
-  async function candidates(viewerId, { date = null, days = 7, vehicle_type = null, min_seats = null, limit = 300 } = {}) {
+  async function candidates(viewerId, { date = null, days = 7, vehicle_type = null, min_seats = null, women_only = false, limit = 300 } = {}) {
     const today = todayStr();
     const params = [viewerId ?? null];
-    const where = [`t.status = 'open'`, `(SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3`,
+    const where = [`t.status = 'open'`, WOMEN_GATE, `(SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3`,
       `NOT EXISTS (SELECT 1 FROM blocked_users b WHERE (b.blocker_id = $1 AND b.blocked_id = t.owner_id) OR (b.blocker_id = t.owner_id AND b.blocked_id = $1))`];
     if (viewerId) where.push("t.owner_id <> $1");
     const add = (sql, v) => { params.push(v); where.push(sql.replaceAll("?", `$${params.length}`)); };
     if (date && isDate(date)) add("t.depart_date = ?", date < today ? today : date);
     else { add("t.depart_date >= ?", today); add("t.depart_date <= ?", new Date(Date.now() + days * 864e5).toLocaleDateString("en-CA", { timeZone: TZ })); }
     if (vehicle_type && VEHICLES.includes(vehicle_type)) add("t.vehicle_type = ?", vehicle_type);
-    if (viewerId) {
-      const me = await db.one("SELECT gender FROM users WHERE id = $1", [viewerId]);
-      if (!me || me.gender !== "female") where.push("t.women_only = 0");
-    }
+    if (women_only) where.push("t.women_only = 1");   // WOMEN_GATE above already limits these to women members
     const rows = await db.query(`${TRIP_SELECT} WHERE ${where.join(" AND ")} ORDER BY t.depart_date, t.depart_time LIMIT ${Math.min(limit, 500)}`, params);
     const views = await tripViews(rows, viewerId);
     const byId = new Map(rows.map((r) => [r.id, r]));
@@ -340,7 +363,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   explore.register(app, { auth, optionalAuth, writeLimit, intParam, candidates, L, sdk });
   const ai = createAi({ db, HttpError, bad, clean, explore, candidates, getTrip, todayStr, TZ, ...(aiFetch ? { fetchImpl: aiFetch } : {}) });
   ai.register(app, { auth, writeLimit, intParam, L });
-  const social = createSocial({ db, HttpError, bad, clean, chat, explore, candidates, getTrip, tripViews, TRIP_SELECT, todayStr, TZ, publicProfile, RATING_COLS });
+  const social = createSocial({ db, HttpError, bad, clean, chat, explore, candidates, getTrip, tripViews, TRIP_SELECT, WOMEN_GATE, todayStr, TZ, publicProfile, RATING_COLS });
   social.register(app, { auth, optionalAuth, writeLimit, intParam, likeEscape, L });
 
   // ----- auth -----
@@ -368,15 +391,44 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
     );
     if (!rows.length) throw new HttpError(409, "An account with this email already exists");
     setAuthCookie(res, rows[0].id);
+    await sendConfirmation(rows[0].id, email, name);
     res.status(201).json({ user: selfProfile(await getUser(rows[0].id)) });
+  });
+
+  // ----- email confirmation: notification emails only ever go to addresses their owner confirmed -----
+  // The token is single-purpose (own audience, no "id" claim), so it can never be used to log in.
+  const VERIFY_AUD = "saathride-email-verify";
+  async function sendConfirmation(userId, email, name) {
+    if (!mailer.enabled()) return { sent: false, reason: mailer.status() };
+    const token = jwt.sign({ vid: userId, em: email }, JWT_SECRET, { expiresIn: "3d", audience: VERIFY_AUD });
+    return mailer.send({ to: email, subject: "Confirm your email for SaathRide", heading: `Welcome to SaathRide, ${name.split(" ")[0]}!`,
+      text: "Confirm this address to get email alerts for join requests, replies and messages. The link works for 3 days.",
+      cta: "Confirm my email", link: `/api/auth/verify-email?token=${encodeURIComponent(token)}` });
+  }
+  app.get("/api/auth/verify-email", async (req, res) => {
+    let p = null;
+    try { p = jwt.verify(String(req.query.token || ""), JWT_SECRET, { audience: VERIFY_AUD }); } catch { p = null; }
+    const u = p && Number.isInteger(p.vid) ? await db.one("SELECT id, email FROM users WHERE id = $1", [p.vid]) : null;
+    if (!u || u.email !== p.em) return res.redirect(302, "/#/settings?email=invalid");
+    await db.query("UPDATE users SET email_verified_at = COALESCE(email_verified_at, $2) WHERE id = $1", [u.id, new Date().toISOString()]);
+    res.redirect(302, "/#/settings?email=confirmed");
+  });
+  app.post("/api/me/verify-email", auth, writeLimit("verify-email", 3), async (req, res) => {
+    if (!mailer.enabled()) throw new HttpError(503, "Email isn't switched on for this site yet");
+    const u = await db.one("SELECT name, email, email_verified_at FROM users WHERE id = $1", [req.user.id]);
+    if (u.email_verified_at) return res.json({ ok: true, already: true });
+    const r = await sendConfirmation(req.user.id, u.email, u.name);
+    if (!r.sent) throw new HttpError(502, "Couldn't send the email right now. Please try again later.");
+    res.json({ ok: true });
   });
 
   app.post("/api/auth/login", authLimit, async (req, res) => {
     const email = clean((req.body || {}).email, 254).toLowerCase();
     const password = typeof (req.body || {}).password === "string" ? req.body.password : "";
-    const row = await db.one("SELECT id, password_hash FROM users WHERE email = $1", [email]);
+    const row = await db.one("SELECT id, password_hash, suspended_at FROM users WHERE email = $1", [email]);
     const ok = await bcrypt.compare(password.slice(0, 72), row ? row.password_hash : DUMMY_HASH);
     if (!row || !ok) throw new HttpError(401, "Wrong email or password");
+    if (row.suspended_at) throw new HttpError(403, "This account is suspended. Contact SaathRide support if you think this is a mistake.");
     setAuthCookie(res, row.id);
     res.json({ user: selfProfile(await getUser(row.id)) });
   });
@@ -453,7 +505,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
       : /^[a-z0-9_.]{3,20}$/i.test(key) ? await db.one(`SELECT u.*, ${RATING_COLS} FROM users u WHERE u.username = $1`, [key.toLowerCase()]) : null;
     if (!u) throw new HttpError(404, "Profile not found");
     const id = u.id, me = req.user.id;
-    const visible = `(t.owner_id = $1 OR (SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3)`;
+    const visible = `(t.owner_id = $1 OR (SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3) AND ${WOMEN_GATE}`;
     const [postRows, upcomingRows, total] = await Promise.all([
       db.query(`${TRIP_SELECT} WHERE t.owner_id = $2 AND t.status <> 'cancelled' AND ${visible} ORDER BY t.id DESC LIMIT 30`, [me, id]),
       db.query(`${TRIP_SELECT} WHERE t.owner_id = $2 AND t.status = 'open' AND t.depart_date >= $3 AND ${visible} ORDER BY t.depart_date, t.depart_time LIMIT 20`, [me, id, todayStr()]),
@@ -468,7 +520,7 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
     const q = req.query;
     const viewer = req.user ? req.user.id : null;
     const params = [viewer];
-    const where = [`t.status = 'open'`, `(SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3`,
+    const where = [`t.status = 'open'`, WOMEN_GATE, `(SELECT COUNT(*) FROM reports rp WHERE rp.trip_id = t.id AND rp.status = 'open') < 3`,
       `NOT EXISTS (SELECT 1 FROM blocked_users b WHERE (b.blocker_id = $1 AND b.blocked_id = t.owner_id) OR (b.blocker_id = t.owner_id AND b.blocked_id = $1))`];
     const add = (sql, v) => { params.push(v); where.push(sql.replace("?", `$${params.length}`)); };
     const str = (v) => (typeof v === "string" ? clean(v, 80) : "");
@@ -958,13 +1010,14 @@ function createApp({ limits = {}, destroyImage = destroyCloudinaryImage, livekit
   const escHtml = (x) => String(x ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   app.get("/p/:id", async (req, res, next) => {
     if (!/^\d{1,9}$/.test(req.params.id)) return next();
-    const r = await db.one(`SELECT t.id, t.origin, t.destination, t.depart_date, t.depart_time, t.description, t.status, u.name, u.username
+    const r = await db.one(`SELECT t.id, t.origin, t.destination, t.depart_date, t.depart_time, t.description, t.status, t.women_only, u.name, u.username
                             FROM trips t JOIN users u ON u.id = t.owner_id WHERE t.id = $1`, [Number(req.params.id)]);
     if (!r) return res.redirect(302, "/");
-    const img = await db.one("SELECT url FROM trip_images WHERE trip_id = $1 ORDER BY position, id LIMIT 1", [r.id]);
+    const img = r.women_only ? null : await db.one("SELECT url FROM trip_images WHERE trip_id = $1 ORDER BY position, id LIMIT 1", [r.id]);
     const origin = `${req.protocol}://${req.get("host")}`;
-    const title = `${r.origin} → ${r.destination} · ${r.name} on SaathRide`;
-    const desc = (r.description || `Travelling ${r.depart_date} at ${r.depart_time}. See who's heading your way on SaathRide.`).slice(0, 200);
+    // Link previews are public (any chat app fetches them), so a women-only trip shows nothing identifying.
+    const title = r.women_only ? "A women-only journey on SaathRide" : `${r.origin} → ${r.destination} · ${r.name} on SaathRide`;
+    const desc = r.women_only ? "Log in as a woman member to see this journey." : (r.description || `Travelling ${r.depart_date} at ${r.depart_time}. See who's heading your way on SaathRide.`).slice(0, 200);
     const pic = img ? img.url.replace("/image/upload/", "/image/upload/c_fill,w_1200,h_630,q_auto,f_auto/") : "";
     const dest = `/#/trip/${r.id}`;
     res.set("Cache-Control", "public, max-age=60").type("html").send(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" />

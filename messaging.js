@@ -11,12 +11,17 @@ const STALE_CALL_MS = 4 * 3600_000;   // an "active" call nobody ended is closed
 const NOTIF_TYPES = new Set([
   "interest_request", "interest_accepted", "interest_declined", "interest_withdrawn",
   "new_message", "trip_changed", "trip_cancelled", "trip_completed", "call_missed", "trip_update", "route_match",
+  "safety_checkin", "safety_circle", "safety_boarded", "case_update", "memory_created", "memory_highlight",
 ]);
+// Safety prompts, case updates and cancellations always reach the member — they can't be switched off.
+const ALWAYS_DELIVERED = new Set(["trip_cancelled", "safety_checkin", "safety_circle", "safety_boarded", "case_update"]);
 // Notification categories members can switch off (Edit profile → Notifications).
 const NOTIF_CATEGORY = {
   interest_request: "requests", interest_accepted: "requests", interest_declined: "requests", interest_withdrawn: "requests",
   new_message: "messages", trip_changed: "trips", trip_cancelled: "trips", trip_completed: "trips", trip_update: "trip_updates",
   route_match: "route_matches", call_missed: "calls",
+  safety_checkin: "safety", safety_circle: "safety", safety_boarded: "safety", case_update: "safety",
+  memory_created: "memories", memory_highlight: "memories",
 };
 const parsePrefs = (s) => { try { const o = JSON.parse(s || "{}"); return o && typeof o === "object" ? o : {}; } catch { return {}; } };
 const REPORT_REASONS = ["spam", "unsafe", "harassment", "fake", "inappropriate", "other"];
@@ -53,7 +58,7 @@ function livekitConnectSources() {
   } catch { return []; }
 }
 
-function createMessaging({ db, HttpError, bad, clean, sdkPath = findLivekitSdk() }) {
+function createMessaging({ db, HttpError, bad, clean, sdkPath = findLivekitSdk(), mailer = null }) {
   const lk = () => {
     const e = livekitEnv();
     const urlOk = /^wss:\/\//.test(e.url) || /^ws:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(e.url);
@@ -91,13 +96,39 @@ function createMessaging({ db, HttpError, bad, clean, sdkPath = findLivekitSdk()
     try {
       if (!NOTIF_TYPES.has(type) || !userId || userId === actorId) return;
       if (actorId && (await blockState(userId, actorId)).byMe) return;        // never notify about someone you blocked
-      const u = await db.one("SELECT notif_prefs FROM users WHERE id = $1", [userId]);
+      const u = await db.one("SELECT email, notif_prefs, email_verified_at, last_active_at FROM users WHERE id = $1", [userId]);
       // Members can switch categories off; cancellations of trips they're involved in are always delivered.
-      if (!u || (type !== "trip_cancelled" && parsePrefs(u.notif_prefs)[NOTIF_CATEGORY[type]] === false)) return;
+      if (!u || (!ALWAYS_DELIVERED.has(type) && parsePrefs(u.notif_prefs)[NOTIF_CATEGORY[type]] === false)) return;
       if (ref) await db.query("DELETE FROM notifications WHERE user_id = $1 AND ref = $2 AND read_at IS NULL", [userId, ref]); // collapse repeats
       await db.query("INSERT INTO notifications (user_id, actor_id, type, title, body, link, ref) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         [userId, actorId, type, clean(title, 120), clean(body, 240), clean(link, 120), ref]);
+      await emailCopy(userId, u, { type, title, body, link, ref });
     } catch (err) { console.error("notify failed:", err.message); }
+  }
+
+  // ---------- email copies of notifications ----------
+  // Sent only to confirmed addresses, only for events worth an email, and throttled. Message emails never
+  // include the message itself (chats stay in the app) and are skipped while the person is using the app.
+  const EMAIL = {
+    interest_request: { cta: "Review the request", every: 10 }, interest_accepted: { cta: "Open the trip", every: 2 },
+    interest_declined: { cta: "Find another journey", every: 2 }, new_message: { cta: "Open the chat", every: 30 },
+    trip_changed: { cta: "See what changed", every: 10 }, trip_cancelled: { cta: "Open SaathRide", every: 2 },
+    trip_update: { cta: "Open the trip", every: 5 }, route_match: { cta: "See the journey", every: 60 },
+    safety_checkin: { cta: "Check in now", every: 1 }, safety_circle: { cta: "Open Saath Circle", every: 1 },
+    case_update: { cta: "See your report", every: 1 }, memory_created: { cta: "See the memory", every: 60 },
+  };
+  async function emailCopy(userId, u, { type, title, body, link, ref }) {
+    const rule = EMAIL[type];
+    if (!rule || !mailer || !mailer.enabled() || !u.email || !u.email_verified_at) return;
+    if (parsePrefs(u.notif_prefs).email === false) return;
+    const now = Date.now();
+    if (type === "new_message" && u.last_active_at && now - new Date(u.last_active_at).getTime() < 2 * 60_000) return;
+    const key = `${type}:${ref || link}`;
+    const since = new Date(now - rule.every * 60_000).toISOString();
+    if (await db.one("SELECT id FROM email_log WHERE user_id = $1 AND key = $2 AND sent_at > $3", [userId, key, since])) return;
+    await db.query("INSERT INTO email_log (user_id, key, sent_at) VALUES ($1,$2,$3)", [userId, key, new Date(now).toISOString()]);
+    const text = type === "new_message" ? "Open the chat to read it — messages stay inside SaathRide." : body || "Open SaathRide to see the details.";
+    await mailer.send({ to: u.email, subject: title, heading: title, text, cta: rule.cta, link });
   }
 
   // ---------- conversations ----------
@@ -245,6 +276,8 @@ function createMessaging({ db, HttpError, bad, clean, sdkPath = findLivekitSdk()
     app.get("/api/sync", auth, async (req, res) => {
       const me = req.user.id;
       await tidyCalls([me]);
+      // Coarse "is in the app" marker (at most one write a minute) so message emails aren't sent mid-chat.
+      await db.query("UPDATE users SET last_active_at = $2 WHERE id = $1 AND (last_active_at IS NULL OR last_active_at < $3)", [me, new Date().toISOString(), new Date(Date.now() - 60_000).toISOString()]);
       const [n, msgs, incoming, active] = await Promise.all([
         db.one("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM notifications WHERE user_id = $1 AND read_at IS NULL", [me]),
         unreadMessages(me),

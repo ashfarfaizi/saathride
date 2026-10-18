@@ -452,7 +452,9 @@ async function tripExtras(t) {
       ${me ? `<div class="row mt12"><button class="btn ghost small" data-act="openAi" data-trip="${t.id}" data-q="Help me estimate the contribution for this route">${ICON.spark} Estimate cost share</button>
         ${t.is_owner ? `<button class="btn ghost small" data-act="openAi" data-trip="${t.id}" data-q="Help me write a caption for this trip">${ICON.spark} Caption ideas</button>` : ""}</div>` : ""}
     </section>
-    <section class="card" id="tripUpdates" hidden></section>`;
+    <section class="card" id="tripUpdates" hidden></section>
+    <div id="tripSafety" class="stack"></div>`;
+  if (window.tripSafetyExtras) window.tripSafetyExtras(t);
   if (hasGeo && config.map) {
     try {
       const r = await api(`/api/trips/${t.id}/route`);
@@ -544,18 +546,42 @@ function aiReplyHtml(r) {
       <small>≈ ₹${r.estimate.total_inr} total · ${r.estimate.road_km} km · ${r.estimate.people} ${r.estimate.people === 1 ? "person" : "people"}</small>
       <details><summary>Assumptions</summary><ul>${r.estimate.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul></details></div>` : "";
   const cards = (r.cards || []).length ? `<div class="ai-cards">${r.cards.map((c) => `<div class="ai-card">${miniCard(c.trip)}${reasonChips(c.reasons.slice(0, 3))}</div>`).join("")}</div>` : "";
-  return `<div class="ai-msg bot">${r.notice ? `<p class="ai-notice">${esc(r.notice)}</p>` : ""}${paras}${est}${cards}</div>`;
+  // Drafted join requests: nothing is sent until the member taps "Send request" here.
+  const actions = (r.actions || []).filter((a) => a.type === "join_request").map((a) => `<div class="ai-action" data-action-trip="${a.trip_id}">
+      <div class="row between"><b>${ICON.send} Draft request to ${esc(a.owner_name.split(" ")[0])}</b><span class="basis">not sent</span></div>
+      <small class="muted">${esc(a.route)} · ${esc(fmtDate(a.date))} ${esc(a.time)}</small>
+      <label class="sr-only" for="aiNote${a.trip_id}">Note to ${esc(a.owner_name)}</label>
+      <textarea id="aiNote${a.trip_id}" rows="3" maxlength="200">${esc(a.note)}</textarea>
+      <div class="row"><button type="button" class="btn small" data-act="aiSendJoin" data-id="${a.trip_id}">Send request</button><button type="button" class="btn ghost small" data-act="aiDismissJoin" data-id="${a.trip_id}">Not now</button></div>
+      <small class="muted">Saath AI only drafts this. Sending needs your tap, and the owner decides.</small></div>`).join("");
+  return `<div class="ai-msg bot">${r.notice ? `<p class="ai-notice">${esc(r.notice)}</p>` : ""}${paras}${est}${cards}${actions}</div>`;
+}
+async function aiSendJoin(id, btn) {
+  const box = document.querySelector(`[data-action-trip="${id}"]`); if (!box) return;
+  const note = (box.querySelector("textarea") || {}).value || "";
+  btn.disabled = true;
+  try {
+    await api(`/api/trips/${id}/interest`, { method: "POST", body: { message: note.trim() } });
+    box.innerHTML = `<b>✓ Request sent.</b> <small class="muted">The owner will reply in your inbox. <a href="#/trip/${id}">View journey</a></small>`;
+    toast("Request sent ✓");
+  } catch (err) { toast(err.message); btn.disabled = false; }
 }
 
 // ---------- Edit profile: notifications & safety settings ----------
-const PREF_LABELS = [["messages", "New messages"], ["requests", "Join requests and replies"], ["trips", "Trip changes"], ["trip_updates", "Day-of-travel updates"], ["route_matches", "Journeys matching my saved routes"], ["calls", "Missed calls"]];
+const PREF_LABELS = [["messages", "New messages"], ["requests", "Join requests and replies"], ["trips", "Trip changes"], ["trip_updates", "Day-of-travel updates"], ["route_matches", "Journeys matching my saved routes"], ["calls", "Missed calls"], ["memories", "Journey memories"]];
 async function loadSettingsExtras() {
   const box = $("#prefsBox"); if (!box) return;
   try {
     const { prefs } = await api("/api/me/notification-prefs");
+    const emailBox = !config.email
+      ? `<p class="notice mt12">📧 Email alerts aren't switched on for this site yet — you'll see everything here in the app.</p>`
+      : !me.email_verified
+        ? `<div class="notice mt12">📧 Confirm <b>${esc(me.email)}</b> to get email alerts for requests, replies and safety updates.<div class="row mt8"><button type="button" class="btn small" data-act="resendVerify">Send confirmation email</button></div></div>`
+        : `<label class="check mt12"><input type="checkbox" data-pref="email" ${prefs.email !== false ? "checked" : ""}/> 📧 Also email me at <b>${esc(me.email)}</b></label>`;
     box.innerHTML = `<div class="checks stacked">${PREF_LABELS.map(([k, l]) => `<label class="check"><input type="checkbox" data-pref="${k}" ${prefs[k] ? "checked" : ""}/> ${l}</label>`).join("")}</div>
-      <p class="muted small mt8">Trip cancellations are always shown. Changes save instantly.</p>
-      ${me.is_admin ? `<p class="mt12"><a class="btn ghost small" href="#/admin">${ICON.shield} Review reports</a></p>` : ""}`;
+      ${emailBox}
+      <p class="muted small mt8">Trip cancellations and safety alerts are always shown. Changes save instantly.</p>
+      ${me.is_admin ? `<p class="mt12"><a class="btn ghost small" href="#/admin/cases">${ICON.shield} Safety cases</a> <a class="btn ghost small" href="#/admin">Post & member reports</a></p>` : ""}`;
     box.querySelectorAll("[data-pref]").forEach((el) => el.addEventListener("change", async () => {
       try { await api("/api/me/notification-prefs", { method: "PUT", body: { prefs: { [el.dataset.pref]: el.checked } } }); toast("Saved"); } catch (err) { toast(err.message); el.checked = !el.checked; }
     }));
@@ -570,7 +596,7 @@ async function viewAdmin() {
       <div class="muted small">${esc(r.reason)} · reported by @${esc(r.reporter_username)} · ${esc(ago(r.created_at))} · ${r.open_reports} open</div>${r.details ? `<blockquote>${esc(r.details)}</blockquote>` : ""}</div>
       <span class="status ${r.status === "open" ? "pending" : "ok"}">${esc(r.status)}</span>
       ${r.status === "open" ? `<div class="row"><button class="btn small" data-act="adminReport" data-kind="${kind}" data-id="${r.id}" data-status="resolved">Resolve</button><button class="btn ghost small" data-act="adminReport" data-kind="${kind}" data-id="${r.id}" data-status="dismissed">Dismiss</button></div>` : ""}</div>`;
-  view.innerHTML = `<h1 class="page-title">Reports</h1><p class="muted small">Only accounts listed in ADMIN_EMAILS can see this page. Three open reports hide a post from the feed; dismissing reports restores it.</p>
+  view.innerHTML = `<div class="row between"><h1 class="page-title">Reports</h1><a class="btn small" href="#/admin/cases">${ICON.shield} Safety cases</a></div><p class="muted small">Only accounts listed in ADMIN_EMAILS can see this page. Three open reports hide a post from the feed; dismissing reports restores it.</p>
     <section class="card mt12"><h3>Posts (${d.trip_reports.length})</h3>${d.trip_reports.map((r) => row(r, "trip")).join("") || `<p class="muted">No post reports.</p>`}</section>
     <section class="card mt12"><h3>Members (${d.user_reports.length})</h3>${d.user_reports.map((r) => row(r, "user")).join("") || `<p class="muted">No member reports.</p>`}</section>`;
 }
@@ -584,6 +610,8 @@ document.addEventListener("click", async (e) => {
   else if (act === "closeAi") { const p = $("#aiPanel"); p.hidden = true; p.setAttribute("aria-hidden", "true"); }
   else if (act === "aiSuggest" || act === "aiRetry") { $("#aiInput").value = btn.dataset.q; sendAi(); }
   else if (act === "aiReset") { ai.history = []; ai.tripId = null; aiWelcome(); }
+  else if (act === "aiSendJoin") aiSendJoin(id, btn);
+  else if (act === "aiDismissJoin") { const b = document.querySelector(`[data-action-trip="${id}"]`); if (b) b.innerHTML = `<small class="muted">Draft discarded — nothing was sent.</small>`; }
   else if (act === "mapFocus") selectMapTrip(id);
   else if (act === "mapClose") { const c = $("#mapCard"); c.hidden = true; }
   else if (act === "reloadRoute") route();

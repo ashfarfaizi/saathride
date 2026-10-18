@@ -71,6 +71,6 @@ async function migrate() {
 const ping = async () => true;
 const close = async () => {};
 // test helper: wipe data between suites
-const reset = () => { for (const t of ["trip_updates","saved_routes","geo_cache","calls","notifications","user_reports","blocked_users","conversations","trip_comments","trip_likes","trip_images","ratings","reports","saved_trips","messages","trip_participants","interests","trips","users"]) db.exec(`DELETE FROM ${t}`); };
+const reset = () => { for (const t of ["memory_photos","memory_highlights","memory_members","journey_memories","safety_case_events","safety_cases","trip_boardings","trip_boarding_codes","safety_events","safety_session_contacts","safety_sessions","trusted_contacts","email_log","trip_updates","saved_routes","geo_cache","calls","notifications","user_reports","blocked_users","conversations","trip_comments","trip_likes","trip_images","ratings","reports","saved_trips","messages","trip_participants","interests","trips","users"]) db.exec(`DELETE FROM ${t}`); };
 
 module.exports = { query, one, tx, migrate, ping, close, reset };

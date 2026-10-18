@@ -50,7 +50,7 @@ test.after(() => server.close());
 
 test("config + upload signing: needs login, matches Cloudinary's algorithm, 503 when unconfigured", async () => {
   const anon = new Client();
-  assert.deepEqual((await anon.get("/api/config")).data, { uploads: true, max_images: 5, caption_max: 500, calls: false, calls_status: "not_configured", geo: false, map: false, map_style: "", map_status: "sdk_missing", ai: false, ai_status: "not_configured" });
+  assert.deepEqual((await anon.get("/api/config")).data, { uploads: true, max_images: 5, caption_max: 500, calls: false, calls_status: "not_configured", geo: false, map: false, map_style: "", map_status: "sdk_missing", ai: false, ai_status: "not_configured", email: false, email_status: "not_configured" });
   assert.equal((await anon.post("/api/uploads/sign", {})).status, 401);
 
   const u = await signup("Sign Tester");

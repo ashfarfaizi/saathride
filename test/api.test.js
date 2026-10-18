@@ -122,12 +122,13 @@ test("trips: validation, create, feed shows DB data, filters", async () => {
   await owner.post("/api/trips", tripBody({ origin: "Salt Lake", destination: "Sector V", depart_date: dayOffset(2), depart_time: "09:00", vehicle_type: "public", seats_total: undefined, contribution_inr: undefined, recurring: ["Mon", "Fri", "Xyz"] }));
   await owner.post("/api/trips", tripBody({ origin: "Howrah", destination: "Kolkata Airport", depart_date: dayOffset(1), depart_time: "21:30", vehicle_type: "cab", seats_total: 3, women_only: true }));
 
-  const all = (await new Client().get("/api/trips")).data.trips;
+  const all = (await owner.get("/api/trips")).data.trips;   // the (female) owner sees her women-only trip
   assert.equal(all.length, 3);
+  assert.equal((await new Client().get("/api/trips")).data.trips.length, 2, "logged-out visitors never see women-only trips");
   assert.deepEqual(all.map((t) => t.depart_time), ["08:15", "21:30", "09:00"]);                       // sorted date then time
   const sl = all.find((t) => t.origin === "Salt Lake");
   assert.equal(sl.seats_total, null); assert.deepEqual(sl.recurring, ["Mon", "Fri"]);
-  const q = async (qs) => (await new Client().get("/api/trips?" + qs)).data.trips.map((t) => t.origin);
+  const q = async (qs) => (await owner.get("/api/trips?" + qs)).data.trips.map((t) => t.origin);
   assert.deepEqual(await q("origin=gol"), ["Gol Bazar"]);
   assert.deepEqual(await q("destination=AIRPORT"), ["Howrah"]);
   assert.deepEqual((await q(`date=${dayOffset(2)}`)), ["Salt Lake"]);
@@ -226,7 +227,19 @@ test("women-only trips: only female members can request", async () => {
   const male = await signup("Some Guy", { gender: "male" });
   const female = await signup("Some Girl", { gender: "female" });
   const { trip } = (await owner.post("/api/trips", tripBody({ origin: "WO A", destination: "WO B", women_only: true }))).data;
-  assert.equal((await male.post(`/api/trips/${trip.id}/interest`)).status, 403);
+  // for men and logged-out visitors the trip doesn't exist: not in the feed, no page, no route, no request
+  assert.equal((await male.post(`/api/trips/${trip.id}/interest`)).status, 404);
+  assert.equal((await male.get(`/api/trips/${trip.id}`)).status, 404);
+  assert.equal((await new Client().get(`/api/trips/${trip.id}`)).status, 404);
+  assert.equal((await male.get(`/api/trips/${trip.id}/route`)).status, 404);
+  assert.ok(!(await male.get("/api/trips")).data.trips.some((t) => t.id === trip.id));
+  const prof = await male.get(`/api/users/${owner.user.id}`); assert.equal(prof.status, 200);
+  assert.ok(!JSON.stringify(prof.data).includes("WO A"), "not listed on the owner's profile either");
+  const preview = await (await fetch(`${base}/p/${trip.id}`, { redirect: "manual" })).text();
+  assert.ok(!preview.includes("WO A") && !preview.includes("Women Owner"), "link previews reveal nothing");
+  // women see it and can ask to join
+  assert.equal((await female.get(`/api/trips/${trip.id}`)).status, 200);
+  assert.ok((await female.get("/api/trips?women_only=1")).data.trips.some((t) => t.id === trip.id));
   assert.equal((await female.post(`/api/trips/${trip.id}/interest`)).status, 201);
 });
 

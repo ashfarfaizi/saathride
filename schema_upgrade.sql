@@ -34,3 +34,10 @@ ALTER TABLE trips ADD COLUMN IF NOT EXISTS route_duration_s INTEGER;
 ALTER TABLE trips ADD COLUMN IF NOT EXISTS route_geom TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_prefs TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_users_college ON users (LOWER(college));
+
+-- ---- Email notifications (safe to re-run) ----
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ;
+
+-- ---- Safety team: account suspension (safe to re-run) ----
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;

@@ -27,12 +27,13 @@ function makeFrontend(cookie) {
     document: { querySelector: get, querySelectorAll: () => [], addEventListener() {}, head: new El("head"), body: new El("body") },
     window: { addEventListener() {}, scrollTo() {} },
     location: { hash: "" }, sessionStorage: { _: {}, getItem(k) { return this._[k] ?? null; }, setItem(k, v) { this._[k] = v; }, removeItem(k) { delete this._[k]; } },
-    confirm: () => true, alert() {},
+    confirm: () => true, alert() {}, navigator: {},
     fetch: (url, opts = {}) => fetch(base + url, { ...opts, headers: { ...(opts.headers || {}), ...(cookie ? { Cookie: cookie } : {}) } }),
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8"), ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "public", "discover.js"), "utf8"), ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "public", "safety.js"), "utf8"), ctx);
   return { ctx, els, errors };
 }
 const wait = (ms = 250) => new Promise((r) => setTimeout(r, ms));
@@ -123,6 +124,17 @@ test("every view renders with real data, escapes hostile text, and does not thro
   await go(r, "#/me"); assert.match(r.els["#app"].innerHTML, /Private details/); assert.match(r.els["#app"].innerHTML, /Privacy/); assert.match(r.els["#app"].innerHTML, /name="username"/);
   await go(r, `#/edit/${t.id}`); assert.match(r.els["#app"].innerHTML, /only edit your own posts/);
   await go(r, "#/mine"); assert.equal(r.ctx.location.hash, "#/profile", "old My trips URL redirects");
+  // safety hub, circle, reporting, women's space (rider is not a woman member)
+  await go(r, "#/safety"); await wait(300); assert.match(r.els["#safetyBody"].innerHTML, /Start safety mode/); assert.match(r.els["#safetyBody"].innerHTML, /112/);
+  assert.match(r.els["#app"].innerHTML, /data-act="sos"/);
+  await go(r, "#/safety?tab=circle"); await wait(300); assert.match(r.els["#safetyBody"].innerHTML, /Saath Circle/); assert.match(r.els["#safetyBody"].innerHTML, /id="circleForm"/);
+  await go(r, "#/safety?tab=reports"); await wait(300); assert.match(r.els["#safetyBody"].innerHTML, /haven't reported anything/);
+  await go(r, `#/safety/report?user=${owner.user.id}`); await wait(300);
+  assert.match(r.els["#app"].innerHTML, /Report a safety concern/); assert.match(r.els["#app"].innerHTML, /Threats or violence/); assert.match(r.els["#app"].innerHTML, /call 112/);
+  await go(r, "#/women"); assert.match(r.els["#app"].innerHTML, /for members who've set their gender to female/);
+  assert.ok(!/Women<\/span>/.test(r.els["#nav"].innerHTML), "no Women nav item for men"); assert.match(r.els["#nav"].innerHTML, /Safety/);
+  await go(r, `#/u/${owner.user.id}`); assert.match(r.els["#app"].innerHTML, /Report a safety concern about/);
+  await go(r, `#/trip/${t.id}`); await wait(300); assert.equal(r.els["#tripSafety"].innerHTML, "", "safety tools only for confirmed travellers");
 
   // owner
   const o = makeFrontend(owner.cookie); await wait();
@@ -138,6 +150,11 @@ test("every view renders with real data, escapes hostile text, and does not thro
   const nl = o.els["#notifList"].innerHTML;
   assert.match(nl, /New request to join/); assert.match(nl, /data-link="#\/inbox\/\d+"/); assert.match(nl, /class="notif unread"/);
   assert.match(o.els["#nav"].innerHTML, /nav-badge/, "unread badge in the nav");
+  await go(o, "#/women"); await wait(400); assert.match(o.els["#app"].innerHTML, /Women's space/); assert.match(o.els["#app"].innerHTML, /Find a women-only match/);
+  assert.ok(!o.els["#app"].innerHTML.includes(XSS)); assert.match(o.els["#nav"].innerHTML, /Women/);
+  await go(o, `#/trip/${t.id}`); await wait(300); assert.match(o.els["#tripSafety"].innerHTML, /Show boarding QR/);
+  for (const gated of ["#/safety", "#/women", "#/safety/report", "#/admin/cases"]) { await go(anon, gated); assert.equal(anon.ctx.location.hash, "#/login", `${gated} requires login`); }
+  await go(o, "#/admin/cases"); assert.match(o.els["#app"].innerHTML, /Page not found/, "case queue is for the safety team only");
   await go(o, "#/profile"); assert.match(o.els["#app"].innerHTML, /profile-grid/); assert.ok(!o.els["#app"].innerHTML.includes(XSS));
   await go(o, "#/community"); assert.match(o.els["#app"].innerHTML, /not verified/); assert.ok(!o.els["#app"].innerHTML.includes(XSS), "community page escapes the college name");
   await go(o, "#/?scope=community"); assert.match(o.els["#app"].innerHTML, /My community/);

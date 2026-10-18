@@ -102,8 +102,10 @@ function renderNav() {
   const items = [
     ["/", "home", "Home"], ["/explore", "compass", "Explore"], ["/post", "plus", "Create", "create"],
     ["/inbox", "inbox", "Inbox"], ["/notifications", "bell", "Notifications"], ["/profile", "user", "Profile"],
+    ...(me ? [["/safety", "shield", "Safety", "nav-extra"]] : []),
+    ...(me && me.gender === "female" ? [["/women", "women", "Women", "nav-extra"]] : []),
   ];
-  const active = (href) => route === href || (href === "/" && route.startsWith("/trip/")) || (href === "/post" && route.startsWith("/edit/")) || (href === "/profile" && route === "/me") || (href === "/inbox" && route.startsWith("/inbox/"));
+  const active = (href) => route === href || (href !== "/" && route.startsWith(href + "/")) || (href === "/" && route.startsWith("/trip/")) || (href === "/post" && route.startsWith("/edit/")) || (href === "/profile" && route === "/me") || (href === "/inbox" && route.startsWith("/inbox/"));
   $("#nav").innerHTML = items.map(([href, icon, label, cls = ""]) =>
     `<a href="#${href}" class="${cls} ${active(href) ? "active" : ""}" ${active(href) ? 'aria-current="page"' : ""}>${ICON[icon]}${navBadge(href)}<span>${label}</span></a>`).join("");
   $("#authbox").innerHTML = me ? "" : `<a class="btn small ghost" href="#/login">Log in</a><a class="btn small" href="#/signup">Sign up</a>`;
@@ -557,7 +559,7 @@ async function openChat(id) {
       <details class="menu"><summary aria-label="Conversation options">${ICON.more}</summary><div class="menu-list">
         <a href="#/u/${c.other.id}">View profile</a><a href="#/trip/${c.trip.id}">View journey</a>
         <button type="button" data-act="${c.blocked_by_me ? "unblockUser" : "blockUser"}" data-id="${c.other.id}">${c.blocked_by_me ? "Unblock" : "Block"} ${esc(c.other.name.split(" ")[0])}</button>
-        <button type="button" class="danger" data-act="reportUser" data-id="${c.other.id}" data-conv="${c.id}">Report</button></div></details>
+        <button type="button" class="danger" data-act="reportUser" data-id="${c.other.id}" data-conv="${c.id}">Report</button><a class="danger" href="#/safety/report?user=${c.other.id}&conv=${c.id}&trip=${c.trip.id}">Report a safety concern</a></div></details>
     </header>
     <div id="tripCtx">${tripContext(c)}</div>
     <div class="chat-log" id="chatLog" role="log" aria-live="polite" aria-label="Messages"><p class="muted center">Loading messages…</p></div>
@@ -1008,8 +1010,9 @@ if (typeof window.addEventListener === "function") window.addEventListener("page
 
 // ---------- post detail ----------
 async function viewTrip(id, params = {}) {
-  let data;
-  try { data = await api(`/api/trips/${id}`); } catch (err) { return notFound(err.message); }
+  let data; const seq = routeSeq;
+  try { data = await api(`/api/trips/${id}`); } catch (err) { return stale(seq) ? undefined : notFound(err.message); }
+  if (stale(seq)) return;
   const t = data.trip; tripCache.set(t.id, t);
   view.innerHTML = `
     <p class="mt8"><a href="#/">← Back</a></p>
@@ -1166,7 +1169,9 @@ async function viewComposer(editId) {
   if (!me) return needLogin();
   let t = null;
   if (editId) {
-    try { t = (await api(`/api/trips/${editId}`)).trip; } catch (err) { return notFound(err.message); }
+    const seq = routeSeq;
+    try { t = (await api(`/api/trips/${editId}`)).trip; } catch (err) { return stale(seq) ? undefined : notFound(err.message); }
+    if (stale(seq)) return;
     if (!t.is_owner) return notFound("You can only edit your own posts.");
   }
   const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -1279,12 +1284,13 @@ async function viewComposer(editId) {
 // ---------- profiles ----------
 async function viewProfile(key, params = {}) {
   if (!me) return needLogin();
-  let data;
-  try { data = await api(`/api/users/${encodeURIComponent(key)}`); } catch (err) { return notFound(err.message); }
+  let data; const seq = routeSeq;
+  try { data = await api(`/api/users/${encodeURIComponent(key)}`); } catch (err) { return stale(seq) ? undefined : notFound(err.message); }
   const u = data.user, own = me.id === u.id;
   const tab = own && params.tab === "saved" ? "saved" : "posts";
   let list = data.posts;
   if (tab === "saved") { try { list = (await api("/api/me/trips")).saved; } catch (err) { list = []; } }
+  if (stale(seq)) return;
   const base = own ? "#/profile" : `#/u/${u.id}`;
   const chips = (arr) => arr.length ? `<div class="chips">${arr.map((x) => `<span class="chip">${esc(VEHICLES[x] ? VEHICLES[x][0] + " " + VEHICLES[x][1] : x)}</span>`).join("")}</div>` : "";
   const hasAbout = u.travel_areas.length || u.interests.length || u.travel_modes.length;
@@ -1306,9 +1312,12 @@ async function viewProfile(key, params = {}) {
         ${u.interests.length ? `<div class="kv"><h4>Interests</h4>${chips(u.interests)}</div>` : ""}
         ${u.travel_modes.length ? `<div class="kv"><h4>Usually travels by</h4>${chips(u.travel_modes)}</div>` : ""}` : ""}
     </div>
+    <div id="journeyRecord"></div>
     ${own ? `<div class="tabs" role="tablist"><a href="${base}" role="tab" aria-selected="${tab === "posts"}">Posts</a><a href="${base}?tab=saved" role="tab" aria-selected="${tab === "saved"}">Saved</a></div>` : `<h2 class="sec-title">Posts</h2>`}
     ${list.length ? `<div class="profile-grid">${list.map(tile).join("")}</div>`
-      : `<div class="card empty">${tab === "saved" ? "Posts you save show up here — only you can see this list." : own ? `You haven't shared a journey yet.<p class="mt12"><a class="btn" href="#/post">Share your first journey</a></p>` : "No posts yet."}</div>`}`;
+      : `<div class="card empty">${tab === "saved" ? "Posts you save show up here — only you can see this list." : own ? `You haven't shared a journey yet.<p class="mt12"><a class="btn" href="#/post">Share your first journey</a></p>` : "No posts yet."}</div>`}
+    ${!own && me ? `<p class="mt16 center"><a class="link-danger small" href="#/safety/report?user=${u.id}">${ICON.shield} Report a safety concern about ${esc(u.name.split(" ")[0])}</a></p>` : ""}`;
+  if (window.profileJourneys) window.profileJourneys(u.id, own);
 }
 
 function viewEditProfile() {
@@ -1434,7 +1443,11 @@ function viewSignup() {
 }
 
 // ---------- router ----------
+// Each navigation gets a number; slow views drop their result if the person has already moved on.
+let routeSeq = 0;
+const stale = (seq) => seq !== routeSeq;
 function route() {
+  routeSeq++;
   clearInterval(poll); clearInterval(chat.timer); chat.id = null;
   view.className = "";
   const { path, params } = parseHash();
@@ -1456,8 +1469,10 @@ function route() {
   else if (path === "/mine") location.hash = "#/profile";
   else if (path === "/login") viewLogin();
   else if (path === "/signup") viewSignup();
+  else if (window.extraRoute && window.extraRoute(path, params)) { /* safety, women, memories, admin cases… (safety.js) */ }
   else viewHome({});
   renderAiFab();
+  if (window.afterRoute) window.afterRoute(path);
   window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", route);

@@ -4,7 +4,8 @@
 const fs = require("fs");
 const path = require("path");
 
-if (process.env.NODE_ENV === "test") {
+// TEST_PG_URL=postgres://… runs the test suites against a real (scratch!) Postgres database instead.
+if (process.env.NODE_ENV === "test" && !process.env.TEST_PG_URL) {
   module.exports = require("./test/sqlite-adapter");
 } else {
   const { Pool } = require("pg");
@@ -12,7 +13,7 @@ if (process.env.NODE_ENV === "test") {
   // Reuse the pool across warm serverless invocations.
   function getPool() {
     if (!globalThis.__saathridePool) {
-      const raw = process.env.DATABASE_URL;
+      const raw = process.env.TEST_PG_URL || process.env.DATABASE_URL;
       if (!raw) throw new Error("DATABASE_URL is not set (add your Neon connection string to the environment)");
       // pg already treats sslmode=require as full certificate verification; saying so explicitly
       // keeps that behaviour across pg upgrades and silences its per-connection deprecation warning.
