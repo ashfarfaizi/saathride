@@ -92,9 +92,14 @@ const MapKit = {
     el.innerHTML = "";
     const map = new gl.Map({ container: el, style: config.map_style, center: opts.center || [88.36, 22.57], zoom: opts.zoom || 8, cooperativeGestures: !!opts.cooperative });
     map.addControl(new gl.NavigationControl({ showCompass: false }), "top-right");
+    // Continue as soon as the style is parsed — not on "load", which waits for a first painted frame
+    // and never fires in a background tab. Tiles stream in afterwards. Fail only on a real error
+    // before the style arrives (e.g. the style server is unreachable).
     await new Promise((res, rej) => {
-      const t = setTimeout(() => rej(new Error("tiles")), 15000);
-      map.once("load", () => { clearTimeout(t); res(); });
+      let done = false;
+      const ok = () => { if (!done) { done = true; res(); } };
+      map.once("style.load", ok);
+      map.once("error", () => { if (!done) { done = true; rej(new Error("tiles")); } });
     });
     map.addSource("route", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "route-casing", type: "line", source: "route", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#ffffff", "line-width": 9 } });
@@ -118,7 +123,7 @@ const MapKit = {
 const mapFailText = (e) => ({
   not_configured: "The map is switched off on this site. The list below shows the same journeys.",
   sdk: "The map couldn't load. Check your connection — the list below still works.",
-  tiles: "The map tiles are taking too long to load. The list below still works.",
+  tiles: "The map server couldn't be reached right now. The list below still works.",
   webgl: "Your browser can't show interactive maps (WebGL is off). The list below shows the same journeys.",
 }[e.message] || "The map couldn't load right now. The list below still works.");
 
