@@ -45,13 +45,24 @@ if (process.env.NODE_ENV === "test") {
     }
   }
 
+  // One migration at a time across serverless instances. The lock is transaction-scoped
+  // (pg_advisory_xact_lock) so it works through Neon's pooled (PgBouncer, transaction-mode)
+  // endpoint and is released automatically on COMMIT/ROLLBACK — a session lock can be left
+  // dangling on a pooled backend and block every later request. All DDL is IF NOT EXISTS,
+  // so an instance that waits for the lock simply re-runs it as a no-op.
   async function migrate() {
     const client = await getPool().connect();
     try {
-      await client.query("SELECT pg_advisory_lock(727274)");   // one migration at a time across instances
+      await client.query("BEGIN");
+      await client.query("SET LOCAL lock_timeout = '15s'");
+      await client.query("SET LOCAL statement_timeout = '20s'");
+      await client.query("SELECT pg_advisory_xact_lock(727275)");
       for (const file of ["schema.sql", "schema_upgrade.sql"]) await client.query(fs.readFileSync(path.join(__dirname, file), "utf8"));
+      await client.query("COMMIT");
+    } catch (err) {
+      try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+      throw err;
     } finally {
-      try { await client.query("SELECT pg_advisory_unlock(727274)"); } catch { /* ignore */ }
       client.release();
     }
   }
