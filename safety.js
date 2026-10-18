@@ -212,6 +212,9 @@ function createSafety({ db, HttpError, bad, clean, chat, mailer, getTrip, TZ, fo
       if (!secret || !sameCode(given, secret)) throw new HttpError(404, "Not found");
       res.json({ ok: true, ...(await sweep()) });
     });
+    // Keyless heartbeat for free schedulers (GitHub Actions). Safe to expose: it only runs the same
+    // throttled sweep the app already runs on normal traffic (at most once a minute) and returns nothing.
+    app.all("/api/cron/tick", async (_req, res) => { await maybeSweep(); res.set("Cache-Control", "no-store").json({ ok: true }); });
 
     // ---- Saath Circle ----
     app.get("/api/circle", auth, async (req, res) => {

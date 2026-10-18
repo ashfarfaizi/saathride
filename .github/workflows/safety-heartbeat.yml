@@ -1,0 +1,21 @@
+# Keeps the safety check-in watcher running when nobody has the app open.
+# Calls the keyless, throttled /api/cron/tick endpoint — no secrets needed.
+name: Safety heartbeat
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  SITE: https://saathride-eu3h.vercel.app
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Run the safety sweep
+        run: curl -fsS -X POST --max-time 30 "$SITE/api/cron/tick"

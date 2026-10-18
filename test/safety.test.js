@@ -169,6 +169,9 @@ test("safety session: check-ins, missed check-in asks the traveller first, then 
   assert.equal((await intruder.post(`/api/safety/sessions/${s.id}/checkin`, { stage: "ok" })).status, 404);
   // cron hook is secret
   assert.equal((await fetch(`${base}/api/cron/safety-sweep`, { method: "POST" })).status, 404);
+  // keyless heartbeat works without a secret but reveals nothing
+  const tick = await fetch(`${base}/api/cron/tick`, { method: "POST" });
+  assert.equal(tick.status, 200); assert.deepEqual(await tick.json(), { ok: true });
 });
 
 test("“only remind me” plan never emails the circle; SOS always alerts accepted contacts", async () => {

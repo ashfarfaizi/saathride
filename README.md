@@ -103,7 +103,11 @@ Prefer Resend? Set `RESEND_API_KEY` instead (free ~3,000/month, but until you ve
 
 ## 1g. Safety check-in watcher — free scheduler (recommended, ~3 minutes)
 
-Missed check-ins and overdue arrivals are handled by a watcher. It already runs whenever anyone uses the app (at most once a minute per server instance), but at quiet times nobody may be online — so give it a heartbeat:
+Missed check-ins and overdue arrivals are handled by a watcher. It already runs whenever anyone uses the app (at most once a minute per server instance), but at quiet times nobody may be online — so give it a heartbeat.
+
+**Built in:** `.github/workflows/safety-heartbeat.yml` pings the keyless `/api/cron/tick` every 5 minutes from GitHub Actions (free, no setup; edit `SITE` in the file if your URL changes). GitHub runs schedules on a best-effort basis, so gaps of 5–15 minutes are normal.
+
+**Tighter (every minute, optional):**
 
 1. In Vercel add `CRON_SECRET=` (any long random string) and redeploy.
 2. At <https://cron-job.org> (free) create a job: URL `https://your-site.vercel.app/api/cron/safety-sweep`, method POST, every **1 minute**, with the header `Authorization: Bearer <your CRON_SECRET>`.
