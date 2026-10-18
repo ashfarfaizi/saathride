@@ -105,7 +105,7 @@ Prefer Resend? Set `RESEND_API_KEY` instead (free ~3,000/month, but until you ve
 
 Missed check-ins and overdue arrivals are handled by a watcher. It already runs whenever anyone uses the app (at most once a minute per server instance), but at quiet times nobody may be online — so give it a heartbeat.
 
-**Built in:** `.github/workflows/safety-heartbeat.yml` pings the keyless `/api/cron/tick` every 5 minutes from GitHub Actions (free, no setup; edit `SITE` in the file if your URL changes). GitHub runs schedules on a best-effort basis, so gaps of 5–15 minutes are normal.
+**Built in:** `.github/workflows/safety-heartbeat.yml` pings the keyless `/api/cron/tick` every 30 minutes from GitHub Actions (free, no setup; edit `SITE` in the file if your URL changes). It is deliberately slow: Neon's free database sleeps after 5 idle minutes, and pinging every 5 minutes would keep it awake all month and use up its 100 compute-hours. On a paid database, change it to `*/5`. GitHub may also run schedules a few minutes late.
 
 **Tighter (every minute, optional):**
 

@@ -4,7 +4,9 @@ name: Safety heartbeat
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # Neon's free database sleeps after 5 idle minutes; pinging more often keeps it awake
+    # all month and burns the 100 CU-hour budget. On a paid database use "*/5 * * * *".
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions: {}
