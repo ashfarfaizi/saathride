@@ -13,7 +13,7 @@ Only the database and `JWT_SECRET` are required. Photos, maps, AI and calls are 
 ## 1. Create the Neon database (one time, ~5 minutes)
 
 1. Go to <https://neon.tech> → **Sign up** (GitHub / Google / email). The free plan is enough.
-2. **Create project** → name it `saathride` → choose region **AWS Asia Pacific (Mumbai) – ap-south-1** (closest to India; matches the `bom1` region in `vercel.json`) → **Create**.
+2. **Create project** → name it `saathride` → choose a region and set `regions` in `vercel.json` to the matching Vercel region so functions sit next to the database (every query is a round trip). The live deployment uses Neon **Washington, D.C. (us-east-1)** with Vercel **`iad1`**; for an India-only audience, Neon **Singapore** with Vercel **`sin1`** is lower latency. → **Create**.
 3. On the project dashboard click **Connect**. Pick branch `main`, database `neondb`, and keep **Connection pooling ON** (the host will contain `-pooler`).
 4. Copy the connection string. It looks like  
    `postgresql://neondb_owner:PASSWORD@ep-xxxx-pooler.ap-south-1.aws.neon.tech/neondb?sslmode=require`  
